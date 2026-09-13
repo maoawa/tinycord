@@ -161,6 +161,11 @@ struct VoiceMessageRecorderView: View {
     }
 
     private func startRecording() {
+        guard !VoiceCallController.shared.active else {
+            recordingError = "Finish the call before recording a voice message."
+            return
+        }
+        VoiceMessagePlayback.shared.stop()
         startTask?.cancel()
         recordingError = nil
         isRecorded = false

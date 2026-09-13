@@ -11,10 +11,10 @@ public struct DiscordChannel: Identifiable, Codable, Hashable, Sendable {
     public let name: String?
     public let recipients: [DiscordUser]?
     public let icon: String?
-    public let lastMessageId: String?
+    public var lastMessageId: String?
     public let lastPinTimestamp: String?
 
-    // Local client-side unread tracking or preview message
+    // Display cache; explicit read/unread changes are confirmed by Discord first.
     public var lastMessageSnippet: String?
     public var lastMessageTime: Date?
     public var hasUnread: Bool = false

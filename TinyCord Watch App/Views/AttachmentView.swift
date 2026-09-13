@@ -7,6 +7,7 @@ import SwiftUI
 
 struct AttachmentView: View {
     let attachment: DiscordAttachment
+    var isVoiceMessage = false
     @ObservedObject var endpointConfig = EndpointConfig.shared
     @State private var isFullScreenPresented = false
 
@@ -19,7 +20,10 @@ struct AttachmentView: View {
             return nil
         }()
 
-        if attachment.isImage, let imageURL = resolved {
+        if attachment.isAudio || isVoiceMessage {
+            VoiceMessageAttachmentView(attachment: attachment, url: resolved,
+                                       isVoiceMessage: isVoiceMessage || attachment.isVoiceRecording)
+        } else if attachment.isImage, let imageURL = resolved {
             CachedGIFImageView(
                 url: imageURL,
                 dynamicBubbleSizing: true,

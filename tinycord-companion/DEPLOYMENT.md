@@ -81,3 +81,38 @@ Auto-fill button. Review the generated address to match your deployment.
 
 Keep actual deployment domains, hostnames, IPs and operator-specific notes
 outside this repository. `.env` is ignored; use `.env.example` as a template.
+
+## Optional main Gateway proxy for voice calls
+
+Use a separate host with a fixed Discord upstream. Caddy handles the WebSocket
+upgrade automatically; keep normal TLS verification and protocol negotiation.
+This proxies call signaling only, not Discord's Voice Gateway or UDP audio.
+
+```caddyfile
+https://gateway.example.com {
+    tls {
+        protocols tls1.2 tls1.3
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        Cache-Control "no-store"
+        -Server
+    }
+    reverse_proxy https://gateway.discord.gg {
+        header_up Host gateway.discord.gg
+        transport http {
+            tls_server_name gateway.discord.gg
+        }
+    }
+}
+
+http://gateway.example.com {
+    respond "WSS required" 426
+}
+```
+
+Back up the existing Caddyfile, add the blocks, validate, and reload Caddy.
+Verify a WSS connection to `/?v=10&encoding=json` receives opcode 10 (HELLO)
+without sending an account token. Recheck Companion `/healthz` afterwards.
+The Watch uses this endpoint only inside an active CallKit call; normal online
+status and messaging continue through Companion's HTTPS API.

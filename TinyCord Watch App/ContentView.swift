@@ -7,12 +7,20 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var authStore: AuthStore
+    @ObservedObject private var call = VoiceCallController.shared
 
     var body: some View {
-        if authStore.isAuthenticated {
-            ChannelListView()
-        } else {
-            LoginView()
+        Group {
+            if authStore.isAuthenticated {
+                ChannelListView()
+            } else {
+                LoginView()
+            }
+        }
+        .alert("Call failed", isPresented: Binding(get: { call.error != nil }, set: { if !$0 { call.dismissError() } })) {
+            Button("OK") { call.dismissError() }
+        } message: {
+            Text(call.error ?? "")
         }
     }
 }

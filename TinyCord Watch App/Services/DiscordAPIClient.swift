@@ -191,6 +191,21 @@ public final class DiscordAPIClient: @unchecked Sendable {
         return messages
     }
 
+    public func getMessage(channelId: String, messageId: String) async throws -> DiscordMessage {
+        let request = try makeRequest(path: "/channels/\(channelId)/messages/\(messageId)")
+        return try await execute(request)
+    }
+
+    /// Uses the same authenticated Discord REST endpoint as messaging, not local storage.
+    public func setChannelUnread(channelId: String, latestMessageId: String, unread: Bool) async throws {
+        guard !authStore.isBotToken else {
+            throw DiscordReadStateError(message: "Read/unread syncing requires a Discord user account, not a bot token.")
+        }
+        let update = try DiscordReadStateRequest(channelID: channelId, latestMessageID: latestMessageId, unread: unread)
+        let request = try makeRequest(path: update.path, method: "POST", bodyData: update.body)
+        try await DiscordReadStateHTTP.send(request, session: session)
+    }
+
     public func sendMessage(
         channelId: String,
         content: String,

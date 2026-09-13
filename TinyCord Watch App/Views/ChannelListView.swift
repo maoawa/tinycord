@@ -52,17 +52,7 @@ struct ChannelListView: View {
                             isTyping: viewModel.typingChannelIds.contains(channel.id)
                         )
                     }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button {
-                            viewModel.toggleUnread(channelId: channel.id)
-                        } label: {
-                            Label(
-                                channel.hasUnread ? "Read" : "Unread",
-                                systemImage: channel.hasUnread ? "envelope.open.fill" : "envelope.badge.fill"
-                            )
-                        }
-                        .tint(channel.hasUnread ? Color.gray : Color.blue)
-                    }
+
                 }
 
                 if !viewModel.isLoading && viewModel.channels.isEmpty && viewModel.errorMessage == nil {
@@ -148,8 +138,8 @@ struct ChannelListView: View {
                 }
             }
             .navigationDestination(for: DiscordChannel.self) { channel in
-                ChatView(channel: channel).onAppear {
-                    viewModel.markAsRead(channelId: channel.id)
+                ChatView(channel: channel).task {
+                    await viewModel.markAsRead(channelId: channel.id)
                 }
             }
             .sheet(isPresented: $showSettings) {
@@ -165,6 +155,14 @@ struct ChannelListView: View {
             }
             .task {
                 await viewModel.loadChannels()
+            }
+            .alert("Discord read state", isPresented: Binding(
+                get: { viewModel.readStateError != nil },
+                set: { if !$0 { viewModel.readStateError = nil } }
+            )) {
+                Button("OK", role: .cancel) { viewModel.readStateError = nil }
+            } message: {
+                Text(viewModel.readStateError ?? "")
             }
             .refreshable {
                 await viewModel.loadChannels()

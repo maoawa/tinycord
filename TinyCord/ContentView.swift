@@ -607,6 +607,7 @@ struct EndpointProfileEditorSheet: View {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanApi = apiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         return !cleanName.isEmpty && !cleanApi.isEmpty && cleanApi.lowercased().hasPrefix("http")
+            && (gatewayURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || EndpointProfile.validatedGatewayURL(gatewayURL) != nil)
             && (!presenceEnabled || EndpointProfile.validatedPresenceURL(presenceServerURL) != nil)
     }
 
@@ -619,7 +620,7 @@ struct EndpointProfileEditorSheet: View {
 
                 Section(
                     header: Text("Quick Host Setup"),
-                    footer: Text("Enter a domain like proxy.example.com to automatically generate the API and CDN endpoints, plus Companion when enabled.")
+                    footer: Text("Enter a domain like proxy.example.com to generate API, CDN and call Gateway endpoints, plus Companion when enabled.")
                 ) {
                     HStack {
                         TextField("e.g. discord.example.com", text: $baseHostInput)
@@ -652,6 +653,19 @@ struct EndpointProfileEditorSheet: View {
                             .autocorrectionDisabled()
                     }
 
+                }
+
+                Section(header: Text("Voice Call Gateway"),
+                        footer: Text("WSS is used only during a voice call. Leave blank for Discord's official Gateway. Presence and live messages continue through Companion. The separate Voice Gateway and UDP audio connect to Discord directly.")) {
+                    TextField("wss://gateway.example.com/?v=10&encoding=json", text: $gatewayURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    if !gatewayURL.isEmpty && EndpointProfile.validatedGatewayURL(gatewayURL) == nil {
+                        Text("Enter a WSS URL without credentials or a fragment.")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
                 }
 
                 Section(

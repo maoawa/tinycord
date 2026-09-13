@@ -16,12 +16,14 @@ struct EndpointConfigView: View {
     @State private var presenceEnabled = false
     @State private var presenceServerURL = ""
     @State private var editingPresence = false
+    @State private var editingGateway = false
+    @State private var gatewayURL = ""
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 12) {
                 // Profile Switcher Section
-                VStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text("Endpoint Profiles")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
@@ -76,6 +78,7 @@ struct EndpointConfigView: View {
                                 .font(.system(size: 10))
                             Text("Set Custom Host...")
                                 .font(.system(size: 11))
+                            Spacer(minLength: 0)
                         }
                         .foregroundStyle(.white)
                     }
@@ -112,6 +115,25 @@ struct EndpointConfigView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
 
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Voice Call Gateway")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.secondary)
+                        Text(endpointConfig.activeProfile.callGatewayURL?.absoluteString ?? "Invalid WSS URL")
+                            .font(.system(size: 9))
+                        Text("Connects only during calls.")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if !endpointConfig.activeProfile.isOfficial {
+                        Button("Configure Call Gateway") {
+                            gatewayURL = endpointConfig.gatewayURL
+                            editingGateway = true
+                        }
+                        .font(.system(size: 11))
+                    }
+
                     Text(endpointConfig.presenceEnabled ? "TinyCord Companion: \(endpointConfig.presenceHostDisplay)" : "Updates via REST polling")
                         .font(.system(size: 9))
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -135,15 +157,35 @@ struct EndpointConfigView: View {
                 Text("Add and manage custom endpoint profiles in TinyCord on your iPhone.")
                     .font(.system(size: 8))
                     .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                    .multilineTextAlignment(.leading)
                     .padding(.horizontal, 4)
             }
             .padding()
         }
+        .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
         .navigationTitle {
             Text("Endpoints")
                 .foregroundStyle(themeManager.color)
                 .fontWeight(.semibold)
+        }
+        .sheet(isPresented: $editingGateway) {
+            ScrollView {
+                VStack(spacing: 10) {
+                    Text("Call Gateway").font(.headline)
+                    TextField("wss://gateway.example.com", text: $gatewayURL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Text("Only used during voice calls. Blank uses Discord. Companion still handles online status and messages.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("Save") {
+                        endpointConfig.updateCallGateway(gatewayURL)
+                        editingGateway = false
+                    }
+                    .disabled(!gatewayURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                              && EndpointProfile.validatedGatewayURL(gatewayURL) == nil)
+                }.padding()
+            }
         }
         .sheet(isPresented: $showHostSheet) {
             ScrollView {
@@ -155,7 +197,7 @@ struct EndpointConfigView: View {
                         Text("Enter base domain, e.g. proxy.example.com")
                             .font(.system(size: 9))
                             .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
+                            .multilineTextAlignment(.leading)
                         TextField("Domain", text: $inputHost)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()

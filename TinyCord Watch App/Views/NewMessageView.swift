@@ -171,22 +171,14 @@ struct NewMessageView: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    if !searchText.isEmpty {
-                        Button {
-                            searchText = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
-                        }
-                    } else {
-                        TextFieldLink(prompt: Text("Search friends...")) {
-                            Image(systemName: "magnifyingglass")
-                                .foregroundStyle(.white)
-                        } onSubmit: { text in
-                            searchText = text
-                        }
-                        .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+                    TextFieldLink(prompt: Text("Search friends...")) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.white)
+                    } onSubmit: { text in
+                        searchText = text
                     }
+                    .accessibilityLabel("Search friends")
+                    .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
                 }
             }
             .task {

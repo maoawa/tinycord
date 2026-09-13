@@ -46,7 +46,7 @@ public struct EndpointProfile: Identifiable, Codable, Equatable, Hashable {
         name = try values.decode(String.self, forKey: .name)
         apiBaseURL = try values.decode(String.self, forKey: .apiBaseURL)
         cdnBaseURL = try values.decode(String.self, forKey: .cdnBaseURL)
-        // Retain legacy metadata for compatibility with older companion apps.
+        // Older profiles may omit the call-only Gateway endpoint.
         gatewayURL = try values.decodeIfPresent(String.self, forKey: .gatewayURL) ?? ""
         isOfficial = try values.decodeIfPresent(Bool.self, forKey: .isOfficial) ?? false
         presenceEnabled = try values.decodeIfPresent(Bool.self, forKey: .presenceEnabled) ?? false
@@ -64,6 +64,26 @@ public struct EndpointProfile: Identifiable, Codable, Equatable, Hashable {
               parts.port == nil || (1...65535).contains(parts.port!),
               let url = parts.url else { return nil }
         return url
+    }
+
+    /// A call Gateway may use a proxy path, but never plaintext, userinfo, or a
+    /// fragment. Normalize the wire format because the client decodes JSON v10.
+    public static func validatedGatewayURL(_ address: String) -> URL? {
+        let clean = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var parts = URLComponents(string: clean), parts.scheme?.lowercased() == "wss",
+              let host = parts.host, !host.isEmpty,
+              parts.user == nil, parts.password == nil, parts.fragment == nil,
+              parts.port == nil || (1...65535).contains(parts.port!) else { return nil }
+        var query = parts.queryItems ?? []
+        query.removeAll { ["v", "encoding", "compress"].contains($0.name) }
+        query += [URLQueryItem(name: "v", value: "10"), URLQueryItem(name: "encoding", value: "json")]
+        parts.queryItems = query
+        return parts.url
+    }
+
+    public var callGatewayURL: URL? {
+        Self.validatedGatewayURL(gatewayURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                 ? Self.official.gatewayURL : gatewayURL)
     }
 
     public static let official = EndpointProfile(

@@ -146,6 +146,9 @@ public final class ChatViewModel: ObservableObject {
                 if self.presenceClient.state != .connected {
                     await self.pollLatestMessages()
                 }
+                // Companion does not forward MESSAGE_UPDATE. Refresh unfinished
+                // call records over HTTPS even while its event stream is healthy.
+                await self.refreshCallRecords()
             }
         }
     }
@@ -159,7 +162,9 @@ public final class ChatViewModel: ObservableObject {
         do {
             let fresh = try await apiClient.getMessages(channelId: channel.id, limit: 10)
             for msg in fresh.reversed() {
-                if !self.messages.contains(where: { $0.id == msg.id }) {
+                if let index = self.messages.firstIndex(where: { $0.id == msg.id }) {
+                    self.messages[index] = markedAsOutgoing(msg)
+                } else {
                     self.appendMessage(msg)
                 }
             }
@@ -174,6 +179,17 @@ public final class ChatViewModel: ObservableObject {
             msg.isOutgoing = (msg.author.id == currentUserId)
         }
         return msg
+    }
+
+    private func refreshCallRecords() async {
+        let pending = messages.filter { $0.isCall && $0.call != nil && $0.call?.endedTimestamp == nil }.suffix(3)
+        for message in pending {
+            guard !Task.isCancelled else { return }
+            guard let updated = try? await apiClient.getMessage(channelId: channel.id, messageId: message.id),
+                  !Task.isCancelled,
+                  let index = messages.firstIndex(where: { $0.id == message.id }) else { continue }
+            messages[index] = markedAsOutgoing(updated)
+        }
     }
 
     public func sendMessage(text: String) async {

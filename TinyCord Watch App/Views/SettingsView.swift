@@ -137,17 +137,21 @@ struct SettingsView: View {
                 NavigationLink(destination: EndpointConfigView()) {
                     HStack {
                         Image(systemName: "network")
-                        Text("Custom Endpoints")
-                            .font(.system(size: 12))
-                        Spacer()
-                        Text(endpointConfig.activeProfile.name)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Custom Endpoints")
+                                .font(.system(size: 12))
+                            Text(endpointConfig.activeProfile.name)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        .multilineTextAlignment(.leading)
+                        Spacer(minLength: 0)
                         Image(systemName: "chevron.right")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .foregroundStyle(.white)
                 }
                 .buttonStyle(.bordered)
@@ -169,6 +173,7 @@ struct SettingsView: View {
                         Text("Test Connection")
                             .font(.system(size: 12))
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .foregroundStyle(.white)
                 }
                 .buttonStyle(.bordered)

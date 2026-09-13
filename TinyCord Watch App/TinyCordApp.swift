@@ -14,6 +14,9 @@ struct TinyCord_Watch_AppApp: App {
 
     init() {
         WatchSyncService.shared.activate()
+        // Register the CallKit provider at launch. This creates no call or
+        // network socket; transports still wait for CallKit audio activation.
+        _ = VoiceCallController.shared
     }
 
     var body: some Scene {
@@ -24,7 +27,12 @@ struct TinyCord_Watch_AppApp: App {
                 .environmentObject(endpointConfig)
                 .environmentObject(themeManager)
                 .onChange(of: scenePhase, initial: true) { _, phase in
-                    PresenceClient.shared.setActive(phase == .active)
+                    switch phase {
+                    case .active: PresenceClient.shared.setActive(true)
+                    case .background: PresenceClient.shared.setActive(false)
+                    case .inactive: break // Wrist-down/dimmed foreground is not leaving the app.
+                    @unknown default: break
+                    }
                 }
                 .onChange(of: authStore.isAuthenticated) { _, authenticated in
                     if authenticated { PresenceClient.shared.connect() }

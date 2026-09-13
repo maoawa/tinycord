@@ -99,6 +99,16 @@ public final class EndpointConfig: ObservableObject, @unchecked Sendable {
         updateProfiles(updated)
     }
 
+    public func updateCallGateway(_ address: String) {
+        let clean = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean.isEmpty || EndpointProfile.validatedGatewayURL(clean) != nil else { return }
+        var updated = profiles
+        guard let index = updated.firstIndex(where: { $0.id == selectedProfileId }),
+              !updated[index].isOfficial else { return }
+        updated[index].gatewayURL = clean
+        updateProfiles(updated)
+    }
+
     public var isOfficialDiscord: Bool {
         selectedProfileId == EndpointProfile.official.id ||
         (apiBaseURL.contains("discord.com") && cdnBaseURL.contains("discordapp.com"))

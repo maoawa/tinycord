@@ -61,6 +61,16 @@ public enum SendStatus: String, Codable, Hashable, Sendable {
     case failed
 }
 
+public struct DiscordCall: Codable, Hashable, Sendable {
+    public let participants: [String]?
+    public let endedTimestamp: String?
+
+    enum CodingKeys: String, CodingKey {
+        case participants
+        case endedTimestamp = "ended_timestamp"
+    }
+}
+
 public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
     public let id: String
     public let channelId: String
@@ -76,6 +86,9 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
     public let pinned: Bool?
     public let stickerItems: [DiscordStickerItem]?
     public let mentions: [DiscordUser]?
+    public let type: Int?
+    public let flags: Int?
+    public let call: DiscordCall?
 
     public var isOutgoing: Bool = false
     public var sendStatus: SendStatus = .sent
@@ -95,6 +108,9 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
         pinned: Bool? = nil,
         stickerItems: [DiscordStickerItem]? = nil,
         mentions: [DiscordUser]? = nil,
+        type: Int? = nil,
+        flags: Int? = nil,
+        call: DiscordCall? = nil,
         isOutgoing: Bool = false,
         sendStatus: SendStatus = .sent
     ) {
@@ -112,6 +128,9 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
         self.pinned = pinned
         self.stickerItems = stickerItems
         self.mentions = mentions
+        self.type = type
+        self.flags = flags
+        self.call = call
         self.isOutgoing = isOutgoing
         self.sendStatus = sendStatus
     }
@@ -131,6 +150,38 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
         case pinned
         case stickerItems = "sticker_items"
         case mentions
+        case type, flags, call
+    }
+
+    public var isCall: Bool { type == 3 }
+    public var isVoiceMessage: Bool {
+        ((flags ?? 0) & (1 << 13)) != 0 || attachments?.contains(where: \.isVoiceRecording) == true
+    }
+
+    public func isMissedCall(currentUserID: String?) -> Bool {
+        guard isCall, call?.endedTimestamp != nil, let currentUserID,
+              author.id != currentUserID, let participants = call?.participants else { return false }
+        return !participants.contains(currentUserID)
+    }
+
+    public func callSummary(currentUserID: String?) -> String {
+        let caller = author.id == currentUserID ? "You" : author.displayName
+        guard let call else { return "\(caller) started a call" }
+        guard let ended = call.endedTimestamp else { return "\(caller) started a call · Ongoing" }
+        let summary = isMissedCall(currentUserID: currentUserID)
+            ? "Missed call from \(author.displayName)"
+            : "\(caller) started a call"
+        guard let startDate = Self.isoFormatterWithFractional.date(from: timestamp) ?? Self.isoFormatterStandard.date(from: timestamp),
+              let endDate = Self.isoFormatterWithFractional.date(from: ended) ?? Self.isoFormatterStandard.date(from: ended) else {
+            return "\(summary) · Ended"
+        }
+        let duration = endDate.timeIntervalSince(startDate)
+        guard duration >= 0, duration < 31_536_000 else { return "\(summary) · Ended" }
+        let seconds = Int(duration)
+        let formatted = seconds >= 3_600
+            ? String(format: "%d:%02d:%02d", seconds / 3_600, (seconds / 60) % 60, seconds % 60)
+            : String(format: "%d:%02d", seconds / 60, seconds % 60)
+        return "\(summary) · \(formatted)"
     }
 
     public static let isoFormatterWithFractional: ISO8601DateFormatter = {
@@ -400,6 +451,8 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
     }
 
     public var displaySnippet: String {
+        if isCall { return "☎ \(callSummary(currentUserID: nil))" }
+        if isVoiceMessage { return "🎤 Voice message" }
         // If message has stickers
         if let stickers = stickerItems, !stickers.isEmpty {
             return "👾 Sticker"
@@ -407,6 +460,7 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
 
         // If message has attachments
         if let atts = attachments, !atts.isEmpty {
+            if atts.first?.isAudio == true { return "🎵 Audio" }
             if atts.first?.isImage == true {
                 return atts.first?.filename.lowercased().hasSuffix(".gif") == true ? "GIF" : "📷 Photo"
             }

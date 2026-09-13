@@ -12,6 +12,9 @@ struct ChatView: View {
     @ObservedObject private var themeManager = ThemeManager.shared
     @State private var showQuickReplySheet = false
     @State private var showVoiceMessageSheet = false
+    @State private var showCallConfirmation = false
+    @State private var showCallActions = false
+    @ObservedObject private var voiceCall = VoiceCallController.shared
     @State private var selectedPhotoItem: PhotosPickerItem? = nil
     @EnvironmentObject var authStore: AuthStore
     @Environment(\.dismiss) private var dismiss
@@ -93,10 +96,12 @@ struct ChatView: View {
                         HStack(spacing: 4) {
                             ProgressView()
                                 .scaleEffect(0.6)
+                                .frame(width: 12, height: 12)
                             Text("\(viewModel.typingUserNames.joined(separator: ", ")) typing...")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 2)
                     }
 
@@ -135,6 +140,19 @@ struct ChatView: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    if viewModel.channel.isDM && !authStore.isBotToken {
+                        Button {
+                            if voiceCall.active { showCallActions = true }
+                            else { showCallConfirmation = true }
+                        } label: {
+                            Image(systemName: voiceCall.active ? "phone.fill" : "phone")
+                        }
+                        .foregroundStyle(.white)
+                        .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+                        .accessibilityLabel(voiceCall.active ? "Call controls" : "Voice call")
+                    }
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
                         dismiss()
@@ -177,6 +195,7 @@ struct ChatView: View {
                                 .foregroundStyle(.white)
                         }
                         .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+                        .disabled(voiceCall.active)
 
                         // Compose message directly invokes watch keyboard / dictation
                         TextFieldLink(prompt: Text("Message...")) {
@@ -219,6 +238,17 @@ struct ChatView: View {
                         await viewModel.sendQuickReply(selected)
                     }
                 }
+            }
+            .alert("Call \(viewModel.channel.displayName(currentUserId: authStore.currentUser?.id))?", isPresented: $showCallConfirmation) {
+                Button("Call") { voiceCall.start(viewModel.channel) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Start a voice call?")
+            }
+            .confirmationDialog("Call with \(voiceCall.name)", isPresented: $showCallActions, titleVisibility: .visible) {
+                Button(voiceCall.muted ? "Unmute" : "Mute", action: voiceCall.toggleMute)
+                Button("End Call", role: .destructive, action: voiceCall.end)
+                Button("Cancel", role: .cancel) {}
             }
             .sheet(isPresented: $showVoiceMessageSheet) {
                 VoiceMessageRecorderView { audioData, durationSecs in

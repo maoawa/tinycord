@@ -138,6 +138,29 @@ struct MessageBubbleView: View {
     }
 
     var body: some View {
+        if message.isCall {
+            HStack(alignment: .top, spacing: 7) {
+                Image(systemName: message.isMissedCall(currentUserID: authStore.currentUser?.id)
+                      ? "phone.down.fill" : "phone.fill")
+                    .foregroundStyle(message.isMissedCall(currentUserID: authStore.currentUser?.id) ? .red : .secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(message.callSummary(currentUserID: authStore.currentUser?.id))
+                        .font(.system(size: 11))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(message.formattedTime)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+        } else {
+            chatBubble
+        }
+    }
+
+    private var chatBubble: some View {
         HStack(alignment: .bottom, spacing: 4) {
             if isOutgoing {
                 Spacer(minLength: 20)
@@ -217,10 +240,15 @@ struct MessageBubbleView: View {
                     }
 
                     // Attachments
+                    if message.isVoiceMessage && (message.attachments?.isEmpty ?? true) {
+                        Label("Voice recording unavailable", systemImage: "waveform")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
                     if let attachments = message.attachments, !attachments.isEmpty {
                         VStack(alignment: isOutgoing ? .trailing : .leading, spacing: 4) {
                             ForEach(attachments) { att in
-                                AttachmentView(attachment: att)
+                                AttachmentView(attachment: att, isVoiceMessage: message.isVoiceMessage)
                             }
                         }
                     }
@@ -400,8 +428,12 @@ struct MessageBubbleView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
+            // Audio controls own taps; long-press still opens reply/reactions.
+            guard !message.isVoiceMessage, message.attachments?.contains(where: \.isAudio) != true else { return }
             showActionsSheet = true
         }
+        .onLongPressGesture { showActionsSheet = true }
+        .accessibilityAction(named: Text("Message actions")) { showActionsSheet = true }
         .sheet(isPresented: $showActionsSheet) {
             MessageActionsSheet(
                 message: message,

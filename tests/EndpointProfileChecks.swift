@@ -22,6 +22,18 @@ struct EndpointProfileChecks {
                         "https://companion.example.com:0", "https://companion.example.com:65536", "https://"] {
             precondition(EndpointProfile.validatedPresenceURL(invalid) == nil, invalid)
         }
-        print("Profile migration, Companion round-trip and HTTPS validation passed.")
+        let main = EndpointProfile.validatedGatewayURL(" wss://gateway.example.com/proxy?v=9&encoding=etf&compress=zlib-stream&route=voice ")!
+        let parts = URLComponents(url: main, resolvingAgainstBaseURL: false)!
+        precondition(parts.path == "/proxy")
+        precondition(parts.queryItems?.contains(URLQueryItem(name: "v", value: "10")) == true)
+        precondition(parts.queryItems?.contains(URLQueryItem(name: "encoding", value: "json")) == true)
+        precondition(parts.queryItems?.contains(URLQueryItem(name: "route", value: "voice")) == true)
+        precondition(parts.queryItems?.contains(where: { $0.name == "compress" }) == false)
+        for invalid in ["ws://gateway.example.com", "https://gateway.example.com", "wss://user:pass@gateway.example.com", "wss://gateway.example.com#fragment", "wss://gateway.example.com:0", "wss://gateway.example.com:65536", "wss://"] {
+            precondition(EndpointProfile.validatedGatewayURL(invalid) == nil)
+        }
+        profile.gatewayURL = ""
+        precondition(profile.callGatewayURL == EndpointProfile.official.callGatewayURL)
+        print("Profile migration, Gateway/Companion round-trip and HTTPS/WSS validation passed.")
     }
 }

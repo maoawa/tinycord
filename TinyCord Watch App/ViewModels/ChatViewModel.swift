@@ -24,7 +24,7 @@ public final class ChatViewModel: ObservableObject {
     @Published public var hasMoreHistory: Bool = true
 
     private let apiClient: DiscordAPIClient
-    private let gatewayClient: DiscordGatewayClient
+    private let presenceClient: PresenceClient
     private let authStore: AuthStore
     private var cancellables = Set<AnyCancellable>()
     private var typingResetTask: Task<Void, Never>?
@@ -32,20 +32,28 @@ public final class ChatViewModel: ObservableObject {
     public init(
         channel: DiscordChannel,
         apiClient: DiscordAPIClient = .shared,
-        gatewayClient: DiscordGatewayClient = .shared,
+        presenceClient: PresenceClient? = nil,
         authStore: AuthStore = .shared
     ) {
         self.channel = channel
         self.apiClient = apiClient
-        self.gatewayClient = gatewayClient
+        self.presenceClient = presenceClient ?? .shared
         self.authStore = authStore
 
-        setupGatewaySubscriptions()
+        setupPresenceSubscriptions()
     }
 
-    private func setupGatewaySubscriptions() {
+    private func setupPresenceSubscriptions() {
+        presenceClient.resyncPublisher
+            .sink { [weak self] in
+                // A lost event window may include deletions or more than ten
+                // messages. Reload the current page instead of only appending.
+                Task { @MainActor in await self?.loadMessages() }
+            }
+            .store(in: &cancellables)
+
         // Real-time new messages
-        gatewayClient.messageCreatePublisher
+        presenceClient.messageCreatePublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] message in
                 guard let self else { return }
@@ -56,7 +64,7 @@ public final class ChatViewModel: ObservableObject {
             .store(in: &cancellables)
 
         // Real-time message deletion
-        gatewayClient.messageDeletePublisher
+        presenceClient.messageDeletePublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] del in
                 guard let self else { return }
@@ -67,7 +75,7 @@ public final class ChatViewModel: ObservableObject {
             .store(in: &cancellables)
 
         // Real-time typing indicators
-        gatewayClient.typingStartPublisher
+        presenceClient.typingStartPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] typing in
                 guard let self else { return }
@@ -134,8 +142,8 @@ public final class ChatViewModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 8_000_000_000)
                 guard let self, !Task.isCancelled else { break }
-                // If Gateway is not connected (e.g. endpoint blocks WS or firewall), poll via REST
-                if self.gatewayClient.state != .connected {
+                // REST remains the fallback when TinyCord Companion is unavailable.
+                if self.presenceClient.state != .connected {
                     await self.pollLatestMessages()
                 }
             }
@@ -229,8 +237,8 @@ public final class ChatViewModel: ObservableObject {
                 self.messages.append(marked)
             }
 
-            // Notify Gateway listeners so channel snippet & position update immediately
-            DiscordGatewayClient.shared.messageCreatePublisher.send(marked)
+            // Notify message listeners so channel snippet & position update immediately
+            PresenceClient.shared.messageCreatePublisher.send(marked)
         } catch {
             self.isSending = false
             self.errorMessage = error.localizedDescription
@@ -344,7 +352,7 @@ public final class ChatViewModel: ObservableObject {
                 self.messages.append(marked)
             }
 
-            DiscordGatewayClient.shared.messageCreatePublisher.send(marked)
+            PresenceClient.shared.messageCreatePublisher.send(marked)
         } catch {
             self.isSending = false
             self.errorMessage = error.localizedDescription
@@ -415,7 +423,7 @@ public final class ChatViewModel: ObservableObject {
                 self.messages.append(marked)
             }
 
-            DiscordGatewayClient.shared.messageCreatePublisher.send(marked)
+            PresenceClient.shared.messageCreatePublisher.send(marked)
         } catch {
             self.isSending = false
             self.errorMessage = error.localizedDescription

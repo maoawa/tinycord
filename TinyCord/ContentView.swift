@@ -584,6 +584,8 @@ struct EndpointProfileEditorSheet: View {
     @State private var apiBaseURL: String = ""
     @State private var cdnBaseURL: String = ""
     @State private var gatewayURL: String = ""
+    @State private var presenceEnabled = false
+    @State private var presenceServerURL = ""
     @State private var baseHostInput: String = ""
     @State private var showDeleteConfirmation: Bool = false
 
@@ -595,6 +597,8 @@ struct EndpointProfileEditorSheet: View {
         _apiBaseURL = State(initialValue: profile?.apiBaseURL ?? "")
         _cdnBaseURL = State(initialValue: profile?.cdnBaseURL ?? "")
         _gatewayURL = State(initialValue: profile?.gatewayURL ?? "")
+        _presenceEnabled = State(initialValue: profile?.presenceEnabled ?? false)
+        _presenceServerURL = State(initialValue: profile?.presenceServerURL ?? "")
     }
 
     var isEditing: Bool { profile != nil }
@@ -603,6 +607,7 @@ struct EndpointProfileEditorSheet: View {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanApi = apiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         return !cleanName.isEmpty && !cleanApi.isEmpty && cleanApi.lowercased().hasPrefix("http")
+            && (!presenceEnabled || EndpointProfile.validatedPresenceURL(presenceServerURL) != nil)
     }
 
     var body: some View {
@@ -614,7 +619,7 @@ struct EndpointProfileEditorSheet: View {
 
                 Section(
                     header: Text("Quick Host Setup"),
-                    footer: Text("Enter a domain like proxy.example.com to automatically generate the API, CDN, and Gateway endpoints.")
+                    footer: Text("Enter a domain like proxy.example.com to automatically generate the API and CDN endpoints, plus Companion when enabled.")
                 ) {
                     HStack {
                         TextField("e.g. discord.example.com", text: $baseHostInput)
@@ -647,13 +652,23 @@ struct EndpointProfileEditorSheet: View {
                             .autocorrectionDisabled()
                     }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Gateway WebSocket URL")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        TextField("wss://...", text: $gatewayURL)
+                }
+
+                Section(
+                    header: Text("TinyCord Companion"),
+                    footer: Text("Show “Active on Apple Watch” while using TinyCord and receive live updates. Use a Companion server you trust: it briefly receives your Discord token to connect, then discards it. HTTPS is required.")
+                ) {
+                    Toggle("Use TinyCord Companion", isOn: $presenceEnabled)
+                    if presenceEnabled {
+                        TextField("https://companion.example.com", text: $presenceServerURL)
+                            .keyboardType(.URL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                        if !presenceServerURL.isEmpty && EndpointProfile.validatedPresenceURL(presenceServerURL) == nil {
+                            Text("Enter an HTTPS address with no path, query or credentials.")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
                     }
                 }
 
@@ -693,7 +708,9 @@ struct EndpointProfileEditorSheet: View {
                             apiBaseURL: cleanApi,
                             cdnBaseURL: cleanCdn.isEmpty ? cleanApi : cleanCdn,
                             gatewayURL: cleanGw,
-                            isOfficial: false
+                            isOfficial: false,
+                            presenceEnabled: presenceEnabled,
+                            presenceServerURL: presenceServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
                         )
                         onSave(updated)
                         dismiss()
@@ -726,7 +743,9 @@ struct EndpointProfileEditorSheet: View {
         }
         trimmed = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
-        if trimmed.lowercased().hasPrefix("cdn.") {
+        if trimmed.lowercased().hasPrefix("companion.") {
+            trimmed = String(trimmed.dropFirst(10))
+        } else if trimmed.lowercased().hasPrefix("cdn.") {
             trimmed = String(trimmed.dropFirst(4))
         } else if trimmed.lowercased().hasPrefix("gateway.") {
             trimmed = String(trimmed.dropFirst(8))
@@ -739,6 +758,9 @@ struct EndpointProfileEditorSheet: View {
         apiBaseURL = "https://\(trimmed)/api/v10"
         cdnBaseURL = "https://cdn.\(trimmed)"
         gatewayURL = "wss://gateway.\(trimmed)/?v=10&encoding=json"
+        if presenceEnabled {
+            presenceServerURL = "https://companion.\(trimmed)"
+        }
 
         if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             name = trimmed

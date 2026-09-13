@@ -1,0 +1,34 @@
+{
+	email {$ACME_EMAIL}
+	auto_https disable_redirects
+	admin off
+	log default {
+		output discard
+	}
+}
+
+https://{$COMPANION_DOMAIN} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		Cache-Control "no-store"
+		-Server
+	}
+	request_body {
+		max_size 8KB
+	}
+	reverse_proxy companion:8080 {
+		header_up X-Forwarded-Proto https
+		transport http {
+			response_header_timeout 30s
+		}
+	}
+}
+
+# Caddy handles ACME HTTP-01 challenges automatically. Plain HTTP never reaches
+# application endpoints, and is not redirected with credentials to another URL.
+http://{$COMPANION_DOMAIN} {
+	respond "HTTPS required" 426
+}

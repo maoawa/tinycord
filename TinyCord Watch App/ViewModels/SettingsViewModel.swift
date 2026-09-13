@@ -11,11 +11,6 @@ import Combine
 public final class SettingsViewModel: ObservableObject {
     @Published public var token: String = ""
     @Published public var isBot: Bool = false
-    @Published public var apiBaseURL: String = ""
-    @Published public var cdnBaseURL: String = ""
-    @Published public var gatewayURL: String = ""
-    @Published public var baseHostInput: String = ""
-    @Published public var enableGateway: Bool = true
 
     @Published public var isTesting: Bool = false
     @Published public var testResultMessage: String?
@@ -40,10 +35,6 @@ public final class SettingsViewModel: ObservableObject {
     public func loadCurrentValues() {
         self.token = authStore.token ?? ""
         self.isBot = authStore.isBotToken
-        self.apiBaseURL = endpointConfig.apiBaseURL
-        self.cdnBaseURL = endpointConfig.cdnBaseURL
-        self.gatewayURL = endpointConfig.gatewayURL
-        self.enableGateway = endpointConfig.enableGateway
     }
 
     public func saveSettings() {
@@ -52,34 +43,11 @@ public final class SettingsViewModel: ObservableObject {
             authStore.setCredentials(token: cleanToken, isBot: isBot)
         }
 
-        endpointConfig.apiBaseURL = apiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        endpointConfig.cdnBaseURL = cdnBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        endpointConfig.gatewayURL = gatewayURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        endpointConfig.enableGateway = enableGateway
-
-        if enableGateway && authStore.isAuthenticated {
-            // Force a fresh socket so new endpoints/credentials take effect
-            DiscordGatewayClient.shared.reconnect(force: true)
-        } else {
-            DiscordGatewayClient.shared.disconnect()
+        if endpointConfig.presenceEnabled && authStore.isAuthenticated {
+            PresenceClient.shared.reconnect(force: true)
+        } else if !endpointConfig.presenceEnabled {
+            PresenceClient.shared.disconnect()
         }
-    }
-
-    public func applyBaseHost() {
-        let trimmed = baseHostInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        endpointConfig.applyBaseHost(trimmed)
-        self.apiBaseURL = endpointConfig.apiBaseURL
-        self.cdnBaseURL = endpointConfig.cdnBaseURL
-        self.gatewayURL = endpointConfig.gatewayURL
-    }
-
-    public func resetToOfficialDiscord() {
-        endpointConfig.resetToOfficial()
-        self.apiBaseURL = endpointConfig.apiBaseURL
-        self.cdnBaseURL = endpointConfig.cdnBaseURL
-        self.gatewayURL = endpointConfig.gatewayURL
     }
 
     public func testConnection() async {
@@ -87,8 +55,10 @@ public final class SettingsViewModel: ObservableObject {
         testResultMessage = nil
         isTestSuccessful = false
 
-        // Temporarily apply current inputs to verify
-        saveSettings()
+        let cleanToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanToken.isEmpty {
+            authStore.setCredentials(token: cleanToken, isBot: isBot)
+        }
 
         guard authStore.isAuthenticated else {
             isTesting = false
@@ -101,7 +71,11 @@ public final class SettingsViewModel: ObservableObject {
             let user = try await apiClient.getCurrentUser()
             self.isTesting = false
             self.isTestSuccessful = true
-            self.testResultMessage = "Connected as \(user.displayName) (\(user.handle))"
+            self.testResultMessage = "REST connected as \(user.displayName) (\(user.handle))"
+
+            if endpointConfig.presenceEnabled {
+                PresenceClient.shared.reconnect(force: true)
+            }
         } catch {
             self.isTesting = false
             self.isTestSuccessful = false
@@ -111,7 +85,7 @@ public final class SettingsViewModel: ObservableObject {
 
     public func logout() {
         authStore.logout()
-        DiscordGatewayClient.shared.disconnect()
+        PresenceClient.shared.disconnect()
         self.token = ""
         self.testResultMessage = nil
     }

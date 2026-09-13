@@ -89,9 +89,9 @@ public final class WatchSyncService: NSObject, ObservableObject, WCSessionDelega
         self.lastSyncDate = Date()
         self.syncStatusMessage = "Synced from iPhone"
 
-        // Reconnect gateway with the freshly synced endpoints/credentials
+        // Reconcile Companion with the freshly synced profile and credentials
         if authStore.isAuthenticated {
-            DiscordGatewayClient.shared.reconnect(force: true)
+            PresenceClient.shared.reconnect(force: true)
         }
     }
 }

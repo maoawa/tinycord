@@ -10,47 +10,26 @@ struct AttachmentView: View {
     @ObservedObject var endpointConfig = EndpointConfig.shared
     @State private var isFullScreenPresented = false
 
-    /// Computes proportional width & height while capping extreme ratios (e.g. 1:10 or 10:1)
-    private var previewSize: CGSize {
-        let maxDim: CGFloat = 140 // Maximum dimension for watch bubble
-        let minDim: CGFloat = 55  // Minimum dimension so it stays legible
-
-        let rawWidth = CGFloat(attachment.width ?? 140)
-        let rawHeight = CGFloat(attachment.height ?? 105)
-
-        // Calculate aspect ratio (width / height)
-        let rawRatio = rawHeight > 0 ? (rawWidth / rawHeight) : 1.33
-
-        // Clamp ratio between 1:2.5 (portrait) and 2.5:1 (landscape)
-        let clampedRatio = min(max(rawRatio, 1.0 / 2.5), 2.5)
-
-        let targetWidth: CGFloat
-        let targetHeight: CGFloat
-
-        if clampedRatio >= 1.0 {
-            // Landscape or square
-            targetWidth = maxDim
-            targetHeight = max(minDim, min(maxDim, maxDim / clampedRatio))
-        } else {
-            // Portrait
-            targetHeight = maxDim
-            targetWidth = max(minDim, min(maxDim, maxDim * clampedRatio))
-        }
-
-        return CGSize(width: targetWidth, height: targetHeight)
-    }
-
     var body: some View {
         let resolved = attachment.resolvedURL(cdnBase: endpointConfig.cdnBaseURL)
-        let size = previewSize
+        let dims: CGSize? = {
+            if let w = attachment.width, let h = attachment.height, w > 0, h > 0 {
+                return CGSize(width: CGFloat(w), height: CGFloat(h))
+            }
+            return nil
+        }()
 
         if attachment.isImage, let imageURL = resolved {
-            Button {
-                isFullScreenPresented = true
-            } label: {
-                CachedGIFImageView(url: imageURL, targetSize: size, contentMode: .fill, cornerRadius: 8)
-            }
-            .buttonStyle(.plain)
+            CachedGIFImageView(
+                url: imageURL,
+                dynamicBubbleSizing: true,
+                initialDimensions: dims,
+                contentMode: .fill,
+                cornerRadius: 8,
+                onImageTap: {
+                    isFullScreenPresented = true
+                }
+            )
             .sheet(isPresented: $isFullScreenPresented) {
                 PhotoDetailView(imageURL: imageURL)
             }

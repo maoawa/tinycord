@@ -16,12 +16,31 @@ public struct DiscordEmbed: Codable, Hashable, Sendable {
     public let image: EmbedMedia?
     public let thumbnail: EmbedMedia?
     public let video: EmbedMedia?
+    public let provider: EmbedProvider?
     public let author: EmbedAuthor?
     public let fields: [EmbedField]?
+
+    public var preferredWidth: Int? {
+        image?.width ?? thumbnail?.width ?? video?.width
+    }
+
+    public var preferredHeight: Int? {
+        image?.height ?? thumbnail?.height ?? video?.height
+    }
 
     public var isMediaEmbed: Bool {
         if type == "gifv" || type == "image" {
             return true
+        }
+        if let host = url.flatMap({ URL(string: $0)?.host?.lowercased() }) {
+            if host.contains("tenor.com") || host.contains("giphy.com") || host.contains("klipy.com") {
+                return true
+            }
+        }
+        if let provName = provider?.name?.lowercased() {
+            if provName.contains("tenor") || provName.contains("giphy") || provName.contains("klipy") {
+                return true
+            }
         }
         // If it has image/thumbnail but no meaningful text description or title, treat as media
         if image != nil || thumbnail != nil {
@@ -35,16 +54,50 @@ public struct DiscordEmbed: Codable, Hashable, Sendable {
     }
 
     public func mediaURL(cdnBase: String) -> URL? {
-        if let thumb = thumbnail?.resolvedURL(cdnBase: cdnBase) {
-            return thumb
+        // 1. If embed URL is from Klipy/Tenor/Giphy, return the provider URL so resolver fetches the native animated .gif
+        if let urlStr = url, let u = URL(string: urlStr) {
+            let host = u.host?.lowercased() ?? ""
+            if host.contains("klipy.com") || host.contains("tenor.com") || host.contains("giphy.com") {
+                return u
+            }
         }
+        if let provName = provider?.name?.lowercased(),
+           provName.contains("klipy") || provName.contains("tenor") || provName.contains("giphy"),
+           let urlStr = url, let u = URL(string: urlStr) {
+            return u
+        }
+
+        // 2. Prefer direct GIF/PNG/JPEG images (natively supported on watchOS)
         if let img = image?.resolvedURL(cdnBase: cdnBase) {
+            let p = img.path.lowercased()
+            if p.hasSuffix(".gif") || p.hasSuffix(".png") || p.hasSuffix(".jpg") || p.hasSuffix(".jpeg") {
+                return img
+            }
+        }
+        if let thumb = thumbnail?.resolvedURL(cdnBase: cdnBase) {
+            let p = thumb.path.lowercased()
+            if p.hasSuffix(".gif") || p.hasSuffix(".png") || p.hasSuffix(".jpg") || p.hasSuffix(".jpeg") {
+                return thumb
+            }
+        }
+
+        // 3. Fallbacks for image, thumbnail, or video
+        if let img = image?.resolvedURL(cdnBase: cdnBase), Self.isImageOrAnimURL(img) {
             return img
         }
-        if let vid = video?.resolvedURL(cdnBase: cdnBase) {
+        if let thumb = thumbnail?.resolvedURL(cdnBase: cdnBase), Self.isImageOrAnimURL(thumb) {
+            return thumb
+        }
+        if let vid = video?.resolvedURL(cdnBase: cdnBase), Self.isImageOrAnimURL(vid) {
             return vid
         }
         return nil
+    }
+
+    private static func isImageOrAnimURL(_ url: URL) -> Bool {
+        let path = url.path.lowercased()
+        let nonImageExtensions = [".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi", ".webp"]
+        return !nonImageExtensions.contains(where: { path.hasSuffix($0) })
     }
 
     public var isWebLinkEmbed: Bool {
@@ -78,16 +131,32 @@ public struct DiscordEmbed: Codable, Hashable, Sendable {
         }
 
         public func resolvedURL(cdnBase: String) -> URL? {
-            guard let url else { return nil }
+            var candidate = url
+            // If url doesn't have an image extension but proxyUrl is available, prefer proxyUrl
+            if let u = url, let parsed = URL(string: u) {
+                let path = parsed.path.lowercased()
+                let hasImgExt = [".gif", ".webp", ".png", ".jpg", ".jpeg"].contains(where: { path.hasSuffix($0) })
+                if !hasImgExt, let p = proxyUrl {
+                    candidate = p
+                }
+            } else if candidate == nil {
+                candidate = proxyUrl
+            }
+            guard let rawStr = candidate else { return nil }
             let trimmedBase = cdnBase.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             if !trimmedBase.contains("discordapp.com") && !trimmedBase.contains("discord.com") {
-                if let parsed = URL(string: url), let host = parsed.host, host.contains("discord") {
+                if let parsed = URL(string: rawStr), let host = parsed.host, host.contains("discord") {
                     let pathAndQuery = parsed.path + (parsed.query.map { "?\($0)" } ?? "")
                     return URL(string: "\(trimmedBase)\(pathAndQuery)")
                 }
             }
-            return URL(string: url)
+            return URL(string: rawStr)
         }
+    }
+
+    public struct EmbedProvider: Codable, Hashable, Sendable {
+        public let name: String?
+        public let url: String?
     }
 
     public struct EmbedAuthor: Codable, Hashable, Sendable {

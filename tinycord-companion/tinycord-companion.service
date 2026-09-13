@@ -1,0 +1,31 @@
+[Unit]
+Description=TinyCord Companion
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/tinycord-companion
+ExecStart=/opt/tinycord-companion/.venv/bin/python /opt/tinycord-companion/server.py
+Environment=BIND_HOST=127.0.0.1 PORT=8787 PYTHONDONTWRITEBYTECODE=1
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+MemoryMax=512M
+MemorySwapMax=0
+LimitCORE=0
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

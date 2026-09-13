@@ -100,7 +100,9 @@ public struct WebLinkCardView: View {
                                     .frame(width: 36, height: 36)
                                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                             default:
-                                EmptyView()
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.gray.opacity(0.2))
+                                    .frame(width: 36, height: 36)
                             }
                         }
                     }

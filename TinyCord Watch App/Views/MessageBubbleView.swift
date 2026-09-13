@@ -229,8 +229,19 @@ struct MessageBubbleView: View {
                     if let stickers = message.stickerItems, !stickers.isEmpty {
                         VStack(alignment: isOutgoing ? .trailing : .leading, spacing: 4) {
                             ForEach(stickers) { sticker in
-                                if let stickerURL = sticker.stickerURL(cdnBase: endpointConfig.cdnBaseURL) {
-                                    InlineMediaView(url: stickerURL)
+                                if let stickerURL = sticker.displayURL(
+                                    cdnBase: endpointConfig.cdnBaseURL,
+                                    companionURL: endpointConfig.presenceEnabled ? endpointConfig.activeProfile.presenceServerURL : nil
+                                ) {
+                                    InlineMediaView(url: stickerURL, initialDimensions: CGSize(width: 120, height: 120))
+                                        .id(stickerURL)
+                                } else {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Label(sticker.name, systemImage: "face.smiling")
+                                        Text(sticker.formatType == 3 ? "Enable TinyCord Companion to view this animated sticker." : "Unsupported sticker format.")
+                                            .font(.system(size: 9))
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                         }
@@ -242,8 +253,15 @@ struct MessageBubbleView: View {
                         if !mediaEmbeds.isEmpty {
                             VStack(alignment: isOutgoing ? .trailing : .leading, spacing: 4) {
                                 ForEach(mediaEmbeds.indices, id: \.self) { idx in
-                                    if let mediaURL = mediaEmbeds[idx].mediaURL(cdnBase: endpointConfig.cdnBaseURL) {
-                                        InlineMediaView(url: mediaURL)
+                                    let embed = mediaEmbeds[idx]
+                                    if let mediaURL = embed.mediaURL(cdnBase: endpointConfig.cdnBaseURL) {
+                                        let dims: CGSize? = {
+                                            if let w = embed.preferredWidth, let h = embed.preferredHeight, w > 0, h > 0 {
+                                                return CGSize(width: CGFloat(w), height: CGFloat(h))
+                                            }
+                                            return nil
+                                        }()
+                                        InlineMediaView(url: mediaURL, initialDimensions: dims)
                                     }
                                 }
                             }
@@ -261,10 +279,16 @@ struct MessageBubbleView: View {
                         }
                     }
 
-                    // Interactive Web Cards for general links
-                    if !message.webCardURLs.isEmpty {
+                    // Interactive Web Cards for general links (filter out URLs already shown as media embeds)
+                    let handledEmbedURLs = Set(message.embeds?.filter(\.isMediaEmbed).compactMap { $0.url.flatMap { URL(string: $0) } } ?? [])
+                    let displayWebCardURLs = message.webCardURLs.filter { webURL in
+                        !handledEmbedURLs.contains(webURL) && !handledEmbedURLs.contains(where: {
+                            $0.absoluteString.contains(webURL.absoluteString) || webURL.absoluteString.contains($0.absoluteString)
+                        })
+                    }
+                    if !displayWebCardURLs.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
-                            ForEach(message.webCardURLs, id: \.self) { webURL in
+                            ForEach(displayWebCardURLs, id: \.self) { webURL in
                                 let matchingEmbed = message.embeds?.first(where: {
                                     $0.url == webURL.absoluteString || ($0.url != nil && webURL.absoluteString.contains($0.url!))
                                 })
@@ -330,8 +354,24 @@ struct MessageBubbleView: View {
                                 let reaction = reactions[idx]
                                 let emojiText = reaction.emoji.name ?? "👍"
                                 HStack(spacing: 2) {
-                                    Text(emojiText)
-                                        .font(.system(size: 10))
+                                    if let emojiId = reaction.emoji.id,
+                                       let emojiURL = URL(string: "\(endpointConfig.cdnBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/emojis/\(emojiId).png?size=32") {
+                                        CachedAsyncImage(url: emojiURL) { phase in
+                                            switch phase {
+                                            case .success(let img):
+                                                img
+                                                    .resizable()
+                                                    .scaledToFit()
+                                                    .frame(width: 11, height: 11)
+                                            default:
+                                                Text(emojiText)
+                                                    .font(.system(size: 10))
+                                            }
+                                        }
+                                    } else {
+                                        Text(emojiText)
+                                            .font(.system(size: 10))
+                                    }
                                     Text("\(reaction.count)")
                                         .font(.system(size: 9))
                                 }
@@ -375,27 +415,27 @@ struct MessageBubbleView: View {
 
 public struct InlineMediaView: View {
     let url: URL
+    var initialDimensions: CGSize? = nil
     @State private var isFullScreen = false
 
-    public init(url: URL) {
+    public init(url: URL, initialDimensions: CGSize? = nil) {
         self.url = url
+        self.initialDimensions = initialDimensions
     }
 
     public var body: some View {
-        Button {
-            isFullScreen = true
-        } label: {
-            CachedGIFImageView(
-                url: url,
-                targetSize: CGSize(width: 135, height: 110),
-                contentMode: .fill,
-                cornerRadius: 8
-            )
-        }
-        .buttonStyle(.plain)
+        CachedGIFImageView(
+            url: url,
+            dynamicBubbleSizing: true,
+            initialDimensions: initialDimensions,
+            contentMode: .fill,
+            cornerRadius: 8,
+            onImageTap: {
+                isFullScreen = true
+            }
+        )
         .sheet(isPresented: $isFullScreen) {
             PhotoDetailView(imageURL: url)
         }
     }
 }
-

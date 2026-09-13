@@ -8,6 +8,7 @@ import SwiftUI
 struct ChannelListView: View {
     @StateObject private var viewModel = ChannelListViewModel()
     @ObservedObject private var themeManager = ThemeManager.shared
+    @ObservedObject private var presenceClient = PresenceClient.shared
     @EnvironmentObject var authStore: AuthStore
     @State private var showSettings = false
     @State private var showNewMessage = false
@@ -88,10 +89,49 @@ struct ChannelListView: View {
                     Button {
                         showSettings = true
                     } label: {
-                        Image(systemName: "gearshape.fill")
-                            .foregroundStyle(.white)
+                        if let user = authStore.currentUser,
+                           let avatarURL = user.avatarURL(cdnBase: EndpointConfig.shared.cdnBaseURL, size: 128) {
+                            CachedAsyncImage(url: avatarURL) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 30, height: 30)
+                                        .clipShape(Circle())
+                                default:
+                                    Image(systemName: "gearshape.fill")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(.white)
+                                        .frame(width: 30, height: 30)
+                                        .background(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+                                        .clipShape(Circle())
+                                }
+                            }
+                        } else {
+                            Image(systemName: "gearshape.fill")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.white)
+                                .frame(width: 30, height: 30)
+                                .background(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+                                .clipShape(Circle())
+                        }
                     }
-                    .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+                    .buttonStyle(.plain)
+                    .frame(width: 30, height: 30)
+                    .clipShape(Circle())
+                    .overlay(alignment: .bottomTrailing) {
+                        if presenceClient.state == .connected {
+                            Circle()
+                                .fill(.green)
+                                .frame(width: 9, height: 9)
+                                .overlay(Circle().strokeBorder(.black, lineWidth: 1.5))
+                                .accessibilityHidden(true)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .accessibilityLabel("Settings")
+                    .accessibilityValue(presenceClient.state == .connected ? "Active on Apple Watch" : "")
                 }
 
                 ToolbarItemGroup(placement: .bottomBar) {

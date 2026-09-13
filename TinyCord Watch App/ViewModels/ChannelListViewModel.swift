@@ -16,7 +16,7 @@ public final class ChannelListViewModel: ObservableObject {
     @Published public private(set) var typingChannelIds: Set<String> = []
 
     private let apiClient: DiscordAPIClient
-    private let gatewayClient: DiscordGatewayClient
+    private let presenceClient: PresenceClient
     private let authStore: AuthStore
     private let endpointConfig: EndpointConfig
     private var cancellables = Set<AnyCancellable>()
@@ -50,12 +50,12 @@ public final class ChannelListViewModel: ObservableObject {
 
     public init(
         apiClient: DiscordAPIClient = .shared,
-        gatewayClient: DiscordGatewayClient = .shared,
+        presenceClient: PresenceClient? = nil,
         authStore: AuthStore = .shared,
         endpointConfig: EndpointConfig = .shared
     ) {
         self.apiClient = apiClient
-        self.gatewayClient = gatewayClient
+        self.presenceClient = presenceClient ?? .shared
         self.authStore = authStore
         self.endpointConfig = endpointConfig
 
@@ -92,16 +92,22 @@ public final class ChannelListViewModel: ObservableObject {
     }
 
     private func setupSubscriptions() {
-        // Gateway message listener
-        gatewayClient.messageCreatePublisher
+        presenceClient.resyncPublisher
+            .sink { [weak self] in
+                Task { @MainActor in await self?.loadChannels() }
+            }
+            .store(in: &cancellables)
+
+        // Companion message listener
+        presenceClient.messageCreatePublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] message in
                 self?.handleIncomingMessage(message)
             }
             .store(in: &cancellables)
 
-        // Gateway typing listener
-        gatewayClient.typingStartPublisher
+        // Companion typing listener
+        presenceClient.typingStartPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] typing in
                 self?.handleTyping(typing)
@@ -162,9 +168,9 @@ public final class ChannelListViewModel: ObservableObject {
             self.channels = fetched
             self.isLoading = false
 
-            // Connect Gateway for live push updates
-            if endpointConfig.enableGateway {
-                gatewayClient.connect()
+            // Connect TinyCord Companion for live updates over HTTPS
+            if endpointConfig.presenceEnabled {
+                presenceClient.connect()
             }
 
             // Fetch real latest messages from API for recent channels

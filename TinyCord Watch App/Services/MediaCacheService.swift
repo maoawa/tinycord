@@ -7,6 +7,45 @@ import Foundation
 import UIKit
 import CryptoKit
 
+// MARK: - Media Diagnostic Types
+
+public struct MediaLoadFailure: Identifiable, Sendable {
+    public var id: String { url.absoluteString + (resolvedURL?.absoluteString ?? "") }
+    public let url: URL
+    public let resolvedURL: URL?
+    public let httpStatusCode: Int?
+    public let mimeType: String?
+    public let dataLength: Int?
+    public let errorDescription: String
+    public let dataSnippet: String?
+    public let timestamp: Date
+
+    public init(
+        url: URL,
+        resolvedURL: URL? = nil,
+        httpStatusCode: Int? = nil,
+        mimeType: String? = nil,
+        dataLength: Int? = nil,
+        errorDescription: String,
+        dataSnippet: String? = nil,
+        timestamp: Date = Date()
+    ) {
+        self.url = url
+        self.resolvedURL = resolvedURL
+        self.httpStatusCode = httpStatusCode
+        self.mimeType = mimeType
+        self.dataLength = dataLength
+        self.errorDescription = errorDescription
+        self.dataSnippet = dataSnippet
+        self.timestamp = timestamp
+    }
+}
+
+public enum MediaLoadResult: Sendable {
+    case success(data: Data, resolvedURL: URL?)
+    case failure(MediaLoadFailure)
+}
+
 public final class MediaCacheService: @unchecked Sendable {
     public static let shared = MediaCacheService()
 
@@ -17,7 +56,7 @@ public final class MediaCacheService: @unchecked Sendable {
     private let diskCacheURL: URL
 
     private let lock = NSLock()
-    private var inFlightTasks: [String: Task<Data?, Never>] = [:]
+    private var inFlightTasks: [String: Task<MediaLoadResult, Never>] = [:]
 
     private init() {
         // Configure memory cache limits suited for Apple Watch (watchOS RAM budget)
@@ -77,46 +116,186 @@ public final class MediaCacheService: @unchecked Sendable {
         return dataMemoryCache.object(forKey: key) as Data?
     }
 
+    // MARK: - Helpers
+
+    public static func unwrapProxiedURL(_ url: URL) -> URL {
+        guard let host = url.host?.lowercased(),
+              host.contains("images-ext") || host.contains("discordapp") else {
+            return url
+        }
+        let path = url.path
+        if let range = path.range(of: "/https/") {
+            let unproxied = "https://" + path[range.upperBound...]
+            if let unwrapped = URL(string: unproxied) {
+                return unwrapped
+            }
+        } else if let range = path.range(of: "/http/") {
+            let unproxied = "http://" + path[range.upperBound...]
+            if let unwrapped = URL(string: unproxied) {
+                return unwrapped
+            }
+        }
+        return url
+    }
+
+    private func isLikelyHTML(_ data: Data) -> Bool {
+        guard data.count >= 6 else { return false }
+        let prefix = String(decoding: data.prefix(120), as: UTF8.self).lowercased()
+        return prefix.contains("<!doctype") || prefix.contains("<html") || prefix.contains("<head") || prefix.contains("<body")
+    }
+
+    public func evictCache(for url: URL) {
+        let key = cacheKey(for: url)
+        dataMemoryCache.removeObject(forKey: key as NSString)
+        imageMemoryCache.removeObject(forKey: key as NSString)
+        let fileURL = diskFileURL(for: key)
+        try? fileManager.removeItem(at: fileURL)
+
+        let unproxied = Self.unwrapProxiedURL(url)
+        if unproxied != url {
+            let unKey = cacheKey(for: unproxied)
+            dataMemoryCache.removeObject(forKey: unKey as NSString)
+            imageMemoryCache.removeObject(forKey: unKey as NSString)
+            try? fileManager.removeItem(at: diskFileURL(for: unKey))
+        }
+    }
+
     // MARK: - Asynchronous Loading
 
-    public func loadData(from url: URL) async -> Data? {
+    public func fetchMedia(from rawURL: URL) async -> MediaLoadResult {
+        let url = Self.unwrapProxiedURL(rawURL)
         let key = cacheKey(for: url)
         let nsKey = key as NSString
 
         // 1. Check memory cache
         if let memoryData = dataMemoryCache.object(forKey: nsKey) as Data? {
-            return memoryData
+            if !isLikelyHTML(memoryData) {
+                return .success(data: memoryData, resolvedURL: url != rawURL ? url : nil)
+            } else {
+                dataMemoryCache.removeObject(forKey: nsKey)
+            }
         }
 
         // 2. Check disk cache
         let fileURL = diskFileURL(for: key)
         if fileManager.fileExists(atPath: fileURL.path),
            let diskData = try? Data(contentsOf: fileURL) {
-            dataMemoryCache.setObject(diskData as NSData, forKey: nsKey, cost: diskData.count)
-            return diskData
+            if isLikelyHTML(diskData) {
+                print("[TinyCord Media] Evicting corrupt HTML error from disk cache for \(url)")
+                try? fileManager.removeItem(at: fileURL)
+            } else {
+                dataMemoryCache.setObject(diskData as NSData, forKey: nsKey, cost: diskData.count)
+                return .success(data: diskData, resolvedURL: url != rawURL ? url : nil)
+            }
         }
 
-        // 3. Deduplicate in-flight network requests
+        // 3. Resolve Klipy webpage URLs if needed
+        var targetURL = url
+        if KlipyResolver.shared.isKlipyWebURL(url) {
+            print("[TinyCord Media] Resolving Klipy webpage URL: \(url)")
+            let klipyResult = await KlipyResolver.shared.resolveDirectMediaURLWithDiagnostics(from: url)
+            switch klipyResult {
+            case .success(let direct):
+                print("[TinyCord Media] Klipy resolved \(url) -> \(direct)")
+                targetURL = direct
+
+                // Check cache for resolved direct media
+                let directKey = cacheKey(for: direct)
+                let directNsKey = directKey as NSString
+                if let memoryData = dataMemoryCache.object(forKey: directNsKey) as Data?, !isLikelyHTML(memoryData) {
+                    dataMemoryCache.setObject(memoryData as NSData, forKey: nsKey, cost: memoryData.count)
+                    return .success(data: memoryData, resolvedURL: direct)
+                }
+                let directDiskURL = diskFileURL(for: directKey)
+                if fileManager.fileExists(atPath: directDiskURL.path),
+                   let diskData = try? Data(contentsOf: directDiskURL) {
+                    if isLikelyHTML(diskData) {
+                        try? fileManager.removeItem(at: directDiskURL)
+                    } else {
+                        dataMemoryCache.setObject(diskData as NSData, forKey: nsKey, cost: diskData.count)
+                        return .success(data: diskData, resolvedURL: direct)
+                    }
+                }
+
+            case .failure(let reason):
+                let failure = MediaLoadFailure(
+                    url: rawURL,
+                    resolvedURL: nil,
+                    httpStatusCode: nil,
+                    mimeType: nil,
+                    dataLength: nil,
+                    errorDescription: "Klipy: \(reason)",
+                    dataSnippet: nil
+                )
+                print("[TinyCord Media] Klipy resolution failed: \(reason)")
+                return .failure(failure)
+            }
+        }
+
+        // 4. Deduplicate in-flight network requests
+        let targetKey = cacheKey(for: targetURL)
         lock.lock()
-        if let ongoing = inFlightTasks[key] {
+        if let ongoing = inFlightTasks[targetKey] {
             lock.unlock()
             return await ongoing.value
         }
 
-        let downloadTask = Task<Data?, Never> { [weak self] () -> Data? in
+        let downloadTask = Task<MediaLoadResult, Never> { [weak self] () -> MediaLoadResult in
             defer {
                 self?.lock.lock()
-                self?.inFlightTasks.removeValue(forKey: key)
+                self?.inFlightTasks.removeValue(forKey: targetKey)
                 self?.lock.unlock()
             }
 
-            var request = URLRequest(url: url)
+            var request = URLRequest(url: targetURL)
             request.timeoutInterval = 20
+            request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+            request.setValue("image/*,video/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
 
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                    return nil
+                guard let http = response as? HTTPURLResponse else {
+                    let fail = MediaLoadFailure(
+                        url: rawURL,
+                        resolvedURL: targetURL,
+                        httpStatusCode: nil,
+                        mimeType: nil,
+                        dataLength: data.count,
+                        errorDescription: "Invalid response from server",
+                        dataSnippet: nil
+                    )
+                    return .failure(fail)
+                }
+
+                guard (200...299).contains(http.statusCode) else {
+                    let snippet = String(data: data.prefix(150), encoding: .utf8)
+                    let statusText = HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
+                    let fail = MediaLoadFailure(
+                        url: rawURL,
+                        resolvedURL: targetURL,
+                        httpStatusCode: http.statusCode,
+                        mimeType: http.mimeType,
+                        dataLength: data.count,
+                        errorDescription: "HTTP \(http.statusCode) (\(statusText))",
+                        dataSnippet: snippet
+                    )
+                    print("[TinyCord Media] HTTP failure \(http.statusCode) for \(targetURL)")
+                    return .failure(fail)
+                }
+
+                if self?.isLikelyHTML(data) == true {
+                    let snippet = String(data: data.prefix(150), encoding: .utf8)
+                    let fail = MediaLoadFailure(
+                        url: rawURL,
+                        resolvedURL: targetURL,
+                        httpStatusCode: http.statusCode,
+                        mimeType: http.mimeType ?? "text/html",
+                        dataLength: data.count,
+                        errorDescription: "Received HTML webpage instead of image",
+                        dataSnippet: snippet
+                    )
+                    print("[TinyCord Media] Server returned HTML for \(targetURL)")
+                    return .failure(fail)
                 }
 
                 // Cache in memory
@@ -127,16 +306,44 @@ public final class MediaCacheService: @unchecked Sendable {
                     try? data.write(to: diskURL, options: .atomic)
                 }
 
-                return data
+                // Also cache under direct media key if redirected
+                if targetURL != url, let self {
+                    let directKey = self.cacheKey(for: targetURL)
+                    self.dataMemoryCache.setObject(data as NSData, forKey: directKey as NSString, cost: data.count)
+                    let directDiskURL = self.diskFileURL(for: directKey)
+                    try? data.write(to: directDiskURL, options: .atomic)
+                }
+
+                print("[TinyCord Media] Successfully loaded \(data.count) bytes for \(targetURL)")
+                return .success(data: data, resolvedURL: targetURL != rawURL ? targetURL : nil)
             } catch {
-                return nil
+                let fail = MediaLoadFailure(
+                    url: rawURL,
+                    resolvedURL: targetURL,
+                    httpStatusCode: nil,
+                    mimeType: nil,
+                    dataLength: nil,
+                    errorDescription: error.localizedDescription,
+                    dataSnippet: nil
+                )
+                print("[TinyCord Media] Network error for \(targetURL): \(error.localizedDescription)")
+                return .failure(fail)
             }
         }
 
-        inFlightTasks[key] = downloadTask
+        inFlightTasks[targetKey] = downloadTask
         lock.unlock()
 
         return await downloadTask.value
+    }
+
+    public func loadData(from url: URL) async -> Data? {
+        switch await fetchMedia(from: url) {
+        case .success(let data, _):
+            return data
+        case .failure:
+            return nil
+        }
     }
 
     public func loadImage(from url: URL) async -> UIImage? {
@@ -231,6 +438,130 @@ public final class MediaCacheService: @unchecked Sendable {
                     break
                 }
             }
+        }
+    }
+}
+
+// MARK: - Klipy Resolver
+
+public enum KlipyResolveResult: Sendable {
+    case success(URL)
+    case failure(reason: String)
+}
+
+public final class KlipyResolver: @unchecked Sendable {
+    public static let shared = KlipyResolver()
+    private let cache = NSCache<NSString, NSURL>()
+
+    private init() {
+        cache.countLimit = 100
+    }
+
+    public func isKlipyURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        return host.contains("klipy.com")
+    }
+
+    public func isKlipyWebURL(_ url: URL) -> Bool {
+        guard isKlipyURL(url) else { return false }
+        if let host = url.host?.lowercased(), host.contains("static") {
+            return false
+        }
+        let pathLower = url.path.lowercased()
+        return pathLower.contains("/gif") || pathLower.contains("/sticker") || pathLower.contains("/clip")
+    }
+
+    public func extractSlug(from url: URL) -> String? {
+        guard isKlipyURL(url) else { return nil }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        if let idx = parts.firstIndex(where: {
+            let l = $0.lowercased()
+            return l == "gifs" || l == "gif" || l == "stickers" || l == "sticker" || l == "clips" || l == "clip"
+        }), idx + 1 < parts.count {
+            return parts[idx + 1]
+        }
+        return nil
+    }
+
+    public func resolveDirectMediaURLWithDiagnostics(from url: URL) async -> KlipyResolveResult {
+        guard let slug = extractSlug(from: url) else {
+            if let host = url.host?.lowercased(), host.contains("static") {
+                return .success(url)
+            }
+            return .failure(reason: "Cannot parse slug from URL path '\(url.path)'")
+        }
+
+        let nsSlug = slug as NSString
+        if let cached = cache.object(forKey: nsSlug) as URL? {
+            return .success(cached)
+        }
+
+        guard let apiURL = URL(string: "https://api.klipy.com/api/v1/gifs/\(slug)") else {
+            return .failure(reason: "Malformed Klipy API URL for slug '\(slug)'")
+        }
+
+        var request = URLRequest(url: apiURL)
+        request.timeoutInterval = 10
+        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .failure(reason: "Invalid non-HTTP response from Klipy API")
+            }
+
+            guard (200...299).contains(http.statusCode) else {
+                return .failure(reason: "Klipy API returned HTTP \(http.statusCode)")
+            }
+
+            struct KlipyResponse: Decodable {
+                struct DataObj: Decodable {
+                    struct FileObj: Decodable {
+                        struct MediaObj: Decodable {
+                            struct Item: Decodable {
+                                let url: String
+                            }
+                            let gif: Item?
+                            let webp: Item?
+                        }
+                        let sm: MediaObj?
+                        let md: MediaObj?
+                        let hd: MediaObj?
+                    }
+                    let file: FileObj?
+                }
+                let data: DataObj?
+            }
+
+            let decoded: KlipyResponse
+            do {
+                decoded = try JSONDecoder().decode(KlipyResponse.self, from: data)
+            } catch {
+                return .failure(reason: "Failed to parse Klipy API JSON: \(error.localizedDescription)")
+            }
+
+            let candidateString = decoded.data?.file?.sm?.gif?.url
+                ?? decoded.data?.file?.md?.gif?.url
+                ?? decoded.data?.file?.hd?.gif?.url
+                ?? decoded.data?.file?.sm?.webp?.url
+                ?? decoded.data?.file?.md?.webp?.url
+
+            if let candidateString, let resolved = URL(string: candidateString) {
+                cache.setObject(resolved as NSURL, forKey: nsSlug)
+                return .success(resolved)
+            } else {
+                return .failure(reason: "No GIF or WebP candidate found in Klipy API response")
+            }
+        } catch {
+            return .failure(reason: "Network error contacting Klipy API: \(error.localizedDescription)")
+        }
+    }
+
+    public func resolveDirectMediaURL(from url: URL) async -> URL? {
+        switch await resolveDirectMediaURLWithDiagnostics(from: url) {
+        case .success(let directURL): return directURL
+        case .failure: return nil
         }
     }
 }

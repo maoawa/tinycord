@@ -13,6 +13,9 @@ struct VoiceMessageRecorderView: View {
     @ObservedObject private var themeManager = ThemeManager.shared
 
     @State private var isRecording: Bool = false
+    @State private var isStarting = false
+    @State private var startTask: Task<Void, Never>?
+    @State private var recordingError: String?
     @State private var isRecorded: Bool = false
     @State private var isPlaying: Bool = false
     @State private var elapsed: TimeInterval = 0
@@ -53,7 +56,17 @@ struct VoiceMessageRecorderView: View {
                 .frame(height: 36)
 
                 // Action Controls
-                if isRecording {
+                if isStarting {
+                    Text("Get ready…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    Button("Cancel") { cancelRecording() }
+                } else if let recordingError {
+                    Text(recordingError)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                    Button("Try Again") { startRecording() }
+                } else if isRecording {
                     // Stop button
                     Button {
                         stopRecording()
@@ -148,12 +161,18 @@ struct VoiceMessageRecorderView: View {
     }
 
     private func startRecording() {
+        startTask?.cancel()
+        recordingError = nil
+        isRecorded = false
+        isStarting = true
+        elapsed = 0
         let audioSession = AVAudioSession.sharedInstance()
         do {
             try audioSession.setCategory(.playAndRecord, mode: .default)
             try audioSession.setActive(true)
         } catch {
-            print("[VoiceRecorder] Audio session error: \(error.localizedDescription)")
+            isStarting = false
+            recordingError = "Microphone unavailable. Try again."
             return
         }
 
@@ -171,31 +190,45 @@ struct VoiceMessageRecorderView: View {
         do {
             let newRecorder = try AVAudioRecorder(url: fileURL, settings: settings)
             newRecorder.isMeteringEnabled = true
-            newRecorder.record()
+            guard newRecorder.prepareToRecord() else {
+                throw NSError(domain: "VoiceRecorder", code: 1)
+            }
             self.recorder = newRecorder
-            self.isRecording = true
-            self.isRecorded = false
-            self.elapsed = 0
+            // Play the start cue before capture so it isn't in the voice message.
             WKInterfaceDevice.current().play(.start)
+            startTask = Task { @MainActor in
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) }
+                catch { return }
+                guard !Task.isCancelled, isStarting else { return }
+                guard newRecorder.record() else {
+                    isStarting = false
+                    recordingError = "Couldn't start recording. Try again."
+                    cleanup()
+                    return
+                }
+                isStarting = false
+                isRecording = true
+                startTask = nil
+                timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+                    guard let rec = self.recorder, rec.isRecording else { return }
+                    rec.updateMeters()
+                    self.elapsed = rec.currentTime
 
-            timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-                guard let rec = self.recorder, rec.isRecording else { return }
-                rec.updateMeters()
-                self.elapsed = rec.currentTime
+                    // Update visual levels
+                    let power = rec.averagePower(forChannel: 0)
+                    let normalized = max(0.1, min(1.0, CGFloat((power + 50) / 50)))
+                    self.audioLevels.removeFirst()
+                    self.audioLevels.append(normalized)
 
-                // Update visual levels
-                let power = rec.averagePower(forChannel: 0)
-                let normalized = max(0.1, min(1.0, CGFloat((power + 50) / 50)))
-                self.audioLevels.removeFirst()
-                self.audioLevels.append(normalized)
-
-                // Enforce 60s maximum duration
-                if self.elapsed >= 60.0 {
-                    self.stopRecording()
+                    // Enforce 60s maximum duration
+                    if self.elapsed >= 60.0 {
+                        self.stopRecording()
+                    }
                 }
             }
         } catch {
-            print("[VoiceRecorder] Recording init error: \(error.localizedDescription)")
+            recordingError = "Couldn't prepare recording. Try again."
+            cleanup()
         }
     }
 
@@ -278,11 +311,16 @@ struct VoiceMessageRecorderView: View {
     }
 
     private func cleanup() {
+        startTask?.cancel()
+        startTask = nil
+        isStarting = false
+        isRecording = false
         timer?.invalidate()
         timer = nil
         recorder?.stop()
         recorder = nil
         cleanupPlayer()
         cleanupFile()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 }

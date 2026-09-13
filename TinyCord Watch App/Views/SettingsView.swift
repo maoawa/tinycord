@@ -7,7 +7,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @StateObject private var viewModel = SettingsViewModel()
-    @ObservedObject private var gatewayClient = DiscordGatewayClient.shared
+    @ObservedObject private var presenceClient = PresenceClient.shared
     @ObservedObject private var syncService = WatchSyncService.shared
     @ObservedObject private var themeManager = ThemeManager.shared
     @ObservedObject private var appSettings = AppSettings.shared
@@ -47,56 +47,48 @@ struct SettingsView: View {
                     .padding(.vertical, 4)
                 }
 
-                // Gateway connection status
-                HStack {
-                    Circle()
-                        .fill(gatewayStatusColor)
-                        .frame(width: 8, height: 8)
-                    Text(gatewayStatusText)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if gatewayClient.state == .disconnected && EndpointConfig.shared.enableGateway {
-                        Button("Retry") {
-                            gatewayClient.connect()
+                // TinyCord Companion status
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Circle()
+                            .fill(presenceStatusColor)
+                            .frame(width: 8, height: 8)
+                        Text(presenceStatusText)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if presenceClient.state != .connected && EndpointConfig.shared.presenceEnabled {
+                            Button("Retry") {
+                                presenceClient.reconnect(force: true)
+                            }
+                            .font(.system(size: 9))
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(themeManager.themeActionButtons ? themeManager.color : .secondary)
                         }
-                        .font(.system(size: 9))
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(themeManager.themeActionButtons ? themeManager.color : .secondary)
+                    }
+
+                    if EndpointConfig.shared.presenceEnabled {
+                        if presenceClient.state != .connected {
+                            HStack(spacing: 3) {
+                                Text("Phase:")
+                                    .foregroundStyle(.secondary.opacity(0.6))
+                                Text(presenceClient.connectionPhase)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .font(.system(size: 8))
+                        }
+                    }
+
+                    if let error = presenceClient.lastError, presenceClient.state != .connected && EndpointConfig.shared.presenceEnabled {
+                        Text(error)
+                            .font(.system(size: 8))
+                            .foregroundStyle(.red.opacity(0.85))
+                            .lineLimit(3)
                     }
                 }
                 .padding(.horizontal, 4)
-
-                // Test Connection Button
-                Button {
-                    Task {
-                        await viewModel.testConnection()
-                    }
-                } label: {
-                    HStack {
-                        if viewModel.isTesting {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                        } else {
-                            Image(systemName: "antenna.radiowaves.left.and.right")
-                        }
-                        Text("Test Connection")
-                            .font(.system(size: 12))
-                    }
-                    .foregroundStyle(.white)
-                }
-                .buttonStyle(.bordered)
-                .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
-
-                if let msg = viewModel.testResultMessage {
-                    Text(msg)
-                        .font(.system(size: 10))
-                        .foregroundStyle(viewModel.isTestSuccessful ? .green : .red)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                }
-
-                Divider()
 
                 // Theme
                 NavigationLink(destination: ThemePickerView()) {
@@ -160,6 +152,35 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+
+                // Test Connection Button
+                Button {
+                    Task {
+                        await viewModel.testConnection()
+                    }
+                } label: {
+                    HStack {
+                        if viewModel.isTesting {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        } else {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                        }
+                        Text("Test Connection")
+                            .font(.system(size: 12))
+                    }
+                    .foregroundStyle(.white)
+                }
+                .buttonStyle(.bordered)
+                .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+
+                if let msg = viewModel.testResultMessage {
+                    Text(msg)
+                        .font(.system(size: 10))
+                        .foregroundStyle(viewModel.isTestSuccessful ? .green : .red)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
 
                 // Edit Token
                 Button {
@@ -264,30 +285,27 @@ struct SettingsView: View {
         }
     }
 
-    private var gatewayStatusText: String {
-        if !EndpointConfig.shared.enableGateway {
-            return "Real-Time: Off (REST)"
+    private var presenceStatusText: String {
+        if !EndpointConfig.shared.presenceEnabled {
+            return "Updates: REST polling"
         }
-        switch gatewayClient.state {
+        switch presenceClient.state {
         case .connected:
-            return "Real-Time: Connected"
+            return "Active on Apple Watch"
         case .connecting:
-            return "Real-Time: Connecting..."
+            return "Connecting to Companion"
         case .reconnecting:
-            return "Real-Time: Reconnecting..."
+            return "Reconnecting to Companion"
         case .disconnected:
-            if let error = gatewayClient.lastError {
-                return "Real-Time: \(error)"
-            }
-            return "Real-Time: Polling Mode"
+            return "Companion disconnected"
         }
     }
 
-    private var gatewayStatusColor: Color {
-        if !EndpointConfig.shared.enableGateway {
+    private var presenceStatusColor: Color {
+        if !EndpointConfig.shared.presenceEnabled {
             return .gray
         }
-        switch gatewayClient.state {
+        switch presenceClient.state {
         case .connected:
             return .green
         case .connecting, .reconnecting:

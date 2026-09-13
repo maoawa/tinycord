@@ -175,7 +175,7 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
             return true
         }
         if let host = url.host?.lowercased() {
-            if host.contains("tenor.com") || host.contains("giphy.com") {
+            if host.contains("tenor.com") || host.contains("giphy.com") || host.contains("klipy.com") {
                 return true
             }
             if (host.contains("discordapp.com") || host.contains("discordapp.net") || host.contains("discord.com")) &&
@@ -422,8 +422,12 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
 
         // If message content is solely a direct media link
         if !directMediaURLs.isEmpty && cleanedTextContent.isEmpty {
-            return directMediaURLs.first?.path.lowercased().hasSuffix(".gif") == true ||
-                   directMediaURLs.first?.host?.contains("tenor") == true ? "GIF" : "📷 Photo"
+            let first = directMediaURLs.first
+            let isGif = first?.path.lowercased().hasSuffix(".gif") == true ||
+                        first?.host?.contains("tenor") == true ||
+                        first?.host?.contains("giphy") == true ||
+                        first?.host?.contains("klipy") == true
+            return isGif ? "GIF" : "📷 Photo"
         }
 
         let cleaned = cleanedTextContent

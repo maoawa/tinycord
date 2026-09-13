@@ -17,7 +17,6 @@ public final class EndpointConfig: ObservableObject, @unchecked Sendable {
         static let apiBase = "tinycord_api_base_url"
         static let cdnBase = "tinycord_cdn_base_url"
         static let gateway = "tinycord_gateway_url"
-        static let useGateway = "tinycord_enable_gateway"
         static let profiles = "tinycord_endpoint_profiles"
         static let selectedProfileId = "tinycord_selected_profile_id"
     }
@@ -45,22 +44,22 @@ public final class EndpointConfig: ObservableObject, @unchecked Sendable {
         }
     }
 
-    @Published public var enableGateway: Bool {
-        didSet {
-            defaults.set(enableGateway, forKey: Keys.useGateway)
-        }
-    }
-
     public init() {
         var loadedProfiles: [EndpointProfile] = []
         if let data = defaults.data(forKey: Keys.profiles),
            let decoded = try? JSONDecoder().decode([EndpointProfile].self, from: data) {
             loadedProfiles = decoded
         }
+
         // Ensure Official Discord is always at index 0 and marked isOfficial
         loadedProfiles.removeAll { $0.id == EndpointProfile.official.id }
         loadedProfiles.insert(EndpointProfile.official, at: 0)
         self.profiles = loadedProfiles
+
+        // Persist the normalized profile list
+        if let data = try? JSONEncoder().encode(loadedProfiles) {
+            defaults.set(data, forKey: Keys.profiles)
+        }
 
         let targetSelectedId: String
         let savedSelectedId = defaults.string(forKey: Keys.selectedProfileId)
@@ -72,25 +71,32 @@ public final class EndpointConfig: ObservableObject, @unchecked Sendable {
         self.selectedProfileId = targetSelectedId
 
         let currentProfile = loadedProfiles.first(where: { $0.id == targetSelectedId }) ?? EndpointProfile.official
+        self.apiBaseURL = currentProfile.apiBaseURL
+        self.cdnBaseURL = currentProfile.cdnBaseURL
+        self.gatewayURL = currentProfile.gatewayURL
+        defaults.set(currentProfile.apiBaseURL, forKey: Keys.apiBase)
+        defaults.set(currentProfile.cdnBaseURL, forKey: Keys.cdnBase)
+        defaults.set(currentProfile.gatewayURL, forKey: Keys.gateway)
 
-        let savedApi = defaults.string(forKey: Keys.apiBase)
-        self.apiBaseURL = (savedApi?.isEmpty == false) ? savedApi! : currentProfile.apiBaseURL
-
-        let savedCdn = defaults.string(forKey: Keys.cdnBase)
-        self.cdnBaseURL = (savedCdn?.isEmpty == false) ? savedCdn! : currentProfile.cdnBaseURL
-
-        let savedGw = defaults.string(forKey: Keys.gateway)
-        self.gatewayURL = (savedGw?.isEmpty == false) ? savedGw! : currentProfile.gatewayURL
-
-        if defaults.object(forKey: Keys.useGateway) != nil {
-            self.enableGateway = defaults.bool(forKey: Keys.useGateway)
-        } else {
-            self.enableGateway = true
-        }
     }
 
     public var activeProfile: EndpointProfile {
         profiles.first(where: { $0.id == selectedProfileId }) ?? EndpointProfile.official
+    }
+
+    public var presenceEnabled: Bool { activeProfile.presenceEnabled }
+
+    public var presenceHostDisplay: String {
+        URL(string: activeProfile.presenceServerURL)?.host ?? activeProfile.presenceServerURL
+    }
+
+    public func updatePresence(enabled: Bool, address: String) {
+        var updated = profiles
+        guard let index = updated.firstIndex(where: { $0.id == selectedProfileId }),
+              !updated[index].isOfficial else { return }
+        updated[index].presenceEnabled = enabled
+        updated[index].presenceServerURL = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        updateProfiles(updated)
     }
 
     public var isOfficialDiscord: Bool {
@@ -107,9 +113,7 @@ public final class EndpointConfig: ObservableObject, @unchecked Sendable {
         self.cdnBaseURL = profile.cdnBaseURL
         self.gatewayURL = profile.gatewayURL
 
-        if enableGateway && AuthStore.shared.isAuthenticated {
-            DiscordGatewayClient.shared.reconnect(force: true)
-        }
+        PresenceClient.shared.reconnect(force: true)
     }
 
     public func updateProfiles(_ newProfiles: [EndpointProfile], selectedId: String? = nil) {
@@ -133,7 +137,7 @@ public final class EndpointConfig: ObservableObject, @unchecked Sendable {
         selectProfile(id: EndpointProfile.official.id)
     }
 
-    public func applyBaseHost(_ hostString: String) {
+    public func applyBaseHost(_ hostString: String, profileName: String? = nil, presenceEnabled: Bool = false, presenceServerURL: String = "") {
         var trimmed = hostString.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.lowercased().hasPrefix("https://") {
             trimmed = String(trimmed.dropFirst("https://".count))
@@ -160,9 +164,26 @@ public final class EndpointConfig: ObservableObject, @unchecked Sendable {
         // discord.com -> <host>
         // cdn.discordapp.com -> cdn.<host>
         // gateway.discord.gg -> gateway.<host>
-        apiBaseURL = "https://\(trimmed)/api/v10"
-        cdnBaseURL = "https://cdn.\(trimmed)"
-        gatewayURL = "wss://gateway.\(trimmed)/?v=10&encoding=json"
+        let api = "https://\(trimmed)/api/v10"
+        let cdn = "https://cdn.\(trimmed)"
+        let gw = "wss://gateway.\(trimmed)/?v=10&encoding=json"
+
+        let resolvedName = (profileName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? profileName! : trimmed
+        let profileId = "custom_\(trimmed.replacingOccurrences(of: ".", with: "_"))"
+        let newProfile = EndpointProfile(
+            id: profileId,
+            name: resolvedName,
+            apiBaseURL: api,
+            cdnBaseURL: cdn,
+            gatewayURL: gw,
+            isOfficial: false,
+            presenceEnabled: presenceEnabled,
+            presenceServerURL: presenceServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+
+        var newProfiles = profiles.filter { $0.id != profileId && $0.id != EndpointProfile.official.id }
+        newProfiles.append(newProfile)
+        updateProfiles(newProfiles, selectedId: profileId)
     }
 
     public func apiURL(path: String) -> URL? {

@@ -72,6 +72,8 @@ struct PhotoDetailView: View {
                 }
             }
         }
+        // Explicitly opened media is not part of the chat viewport queue.
+        .environment(\.chatMediaLoader, nil)
         .focusable()
         .focused($isCrownFocused)
         .digitalCrownRotation(

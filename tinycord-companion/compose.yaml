@@ -1,0 +1,47 @@
+name: tinycord-companion
+services:
+  companion:
+    build: .
+    restart: unless-stopped
+    environment:
+      BIND_HOST: 0.0.0.0
+      DISCORD_GATEWAY_URL: ${DISCORD_GATEWAY_URL:-wss://gateway.discord.gg/?v=10&encoding=json}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # The app has no disk volumes, published ports, swap, core dumps or logs.
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 100
+    ulimits:
+      core: 0
+    logging:
+      driver: none
+    networks: [companion]
+  caddy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    environment:
+      COMPANION_DOMAIN: ${COMPANION_DOMAIN:?Set COMPANION_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    mem_limit: 256m
+    memswap_limit: 256m
+    ulimits:
+      core: 0
+    logging:
+      driver: none
+    networks: [companion]
+    depends_on: [companion]
+networks:
+  companion:
+volumes:
+  # Caddy persists certificates/account keys only, never application requests.
+  caddy_data:
+  caddy_config:

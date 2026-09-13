@@ -8,6 +8,7 @@ import PhotosUI
 
 struct ChatView: View {
     @StateObject var viewModel: ChatViewModel
+    @StateObject private var mediaLoader = ChatMediaLoader()
     @ObservedObject private var themeManager = ThemeManager.shared
     @State private var showQuickReplySheet = false
     @State private var showVoiceMessageSheet = false
@@ -103,10 +104,29 @@ struct ChatView: View {
                     Color.clear
                         .frame(height: 1)
                         .id("bottom_anchor")
+                        .background {
+                            if !viewModel.messages.isEmpty && !viewModel.isLoading {
+                                GeometryReader { geometry in
+                                    Color.clear.preference(key: ChatMediaLayoutKey.self,
+                                        value: ChatMediaLayout(bottom: geometry.frame(in: .global)))
+                                }
+                            }
+                        }
                 }
                 .padding(.horizontal, 4)
                 .padding(.bottom, 60)
             }
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: ChatMediaLayoutKey.self,
+                        value: ChatMediaLayout(viewport: geometry.frame(in: .global)))
+                }
+            }
+            .defaultScrollAnchor(.bottom)
+            .onPreferenceChange(ChatMediaLayoutKey.self) { layout in
+                mediaLoader.update(layout)
+            }
+            .environment(\.chatMediaLoader, mediaLoader)
             .navigationBarBackButtonHidden(true)
             .navigationTitle {
                 Text(viewModel.channel.displayName(currentUserId: authStore.currentUser?.id))
@@ -174,7 +194,7 @@ struct ChatView: View {
             }
             .task {
                 await viewModel.loadMessages()
-                scrollToBottom(proxy: proxy)
+                proxy.scrollTo("bottom_anchor", anchor: .bottom)
             }
             .onChange(of: viewModel.messages.last?.id) {
                 scrollToBottom(proxy: proxy)

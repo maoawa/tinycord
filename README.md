@@ -16,7 +16,7 @@
 
 ## 📖 Overview
 
-**TinyCord** brings Discord messaging to your wrist. Engineered natively with **SwiftUI** and modern Swift Concurrency, TinyCord operates as a fully independent watchOS client (`WKRunsIndependentlyOfCompanionApp`) that connects directly to the Discord Gateway and REST API, paired with an iOS companion app for effortless account setup and customization.
+**TinyCord** brings Discord messaging to your wrist. Engineered natively with **SwiftUI** and modern Swift Concurrency, TinyCord operates as a fully independent watchOS client (`WKRunsIndependentlyOfCompanionApp`) that connects to Discord over HTTPS, with optional live updates and presence through TinyCord Companion, paired with an iOS companion app for effortless account setup and customization.
 
 Whether you are on a run, in a meeting, or away from your phone, TinyCord gives you glanceable access to direct messages, real-time updates, voice recordings, photo sharing, and customizable quick replies.
 
@@ -27,7 +27,7 @@ Whether you are on a run, in a meeting, or away from your phone, TinyCord gives 
 ### ⌚ Apple Watch Client
 
 - **Standalone Operation**:
-  - Connects directly to Discord via Gateway WebSocket and HTTPS REST API.
+  - Uses HTTPS REST directly (or through your configured proxy). Optional TinyCord Companion supplies live events and presence over HTTPS.
   - Functions completely on Wi-Fi or Cellular without needing your iPhone nearby.
 - **Direct & Group DMs**:
   - Browse conversations with real-time unread badges, typing indicators, and message snippet previews.
@@ -62,7 +62,7 @@ Whether you are on a run, in a meeting, or away from your phone, TinyCord gives 
 
 - **Discord Web Login**:
   - In-app embedded web login sheet (`WKWebView`) that captures your session token safely and securely on-device.
-  - No passwords or credentials are ever sent to third parties.
+  - Credentials remain on your devices unless you configure a proxy or enable your own TinyCord Companion server.
 - **User Profile Display**:
   - Real-time display of authenticated avatar, nickname, `@handle`, bot tag, and live connection status.
 - **Token Management**:
@@ -70,7 +70,7 @@ Whether you are on a run, in a meeting, or away from your phone, TinyCord gives 
 - **Apple Watch Settings Management**:
   - Manage Quick Reply presets: add new phrases, swipe left to delete, swipe right to edit, or reset to factory defaults.
 - **Custom Endpoints Management**:
-  - Manage multiple API, CDN, and Gateway endpoint profiles (useful for restricted networks or private relay servers).
+  - Manage multiple API/CDN endpoint profiles with an optional TinyCord Companion toggle and HTTPS address (useful for restricted networks or private relay servers).
   - Default Discord Official profile is safely preserved.
 - **One-Tap Watch Sync**:
   - Instant synchronization of authentication, endpoint configurations, and custom quick replies via Apple `WatchConnectivity`.
@@ -79,13 +79,13 @@ Whether you are on a run, in a meeting, or away from your phone, TinyCord gives 
 
 ## 🛠️ Tech Stack
 
-TinyCord is built with **zero third-party dependencies**—leveraging 100% first-party Apple frameworks:
+The Apple apps use **zero third-party dependencies**. The optional Ubuntu service uses Python/aiohttp, rlottie/Pillow, and Caddy:
 
 | Area | Technologies |
 | :--- | :--- |
 | **Language** | Swift 5.0+ with modern `async`/`await` and `@MainActor` concurrency |
 | **UI Framework** | SwiftUI (declarative state management, `NavigationStack`, `ToolbarItemGroup`, sheets) |
-| **Networking** | Native `URLSession` and `URLSessionWebSocketTask` |
+| **Networking** | Native `URLSession` HTTPS; server-side WebSocket via TinyCord Companion |
 | **Media & Audio** | `AVFoundation` (`AVAudioRecorder`, `AVAudioPlayer`, `AVAudioSession`), `PhotosUI` |
 | **Device Sync** | `WatchConnectivity` (`WCSession` with real-time messages & application context fallback) |
 | **Authentication** | `WebKit` (`WKWebView` with cookie / header observation), `Security` (Keychain Services) |
@@ -95,37 +95,23 @@ TinyCord is built with **zero third-party dependencies**—leveraging 100% first
 
 ## 🧠 Working Principle & Architecture
 
-```
-                                  ┌───────────────────────────┐
-                                  │   Discord Official Cloud  │
-                                  │  (Gateway WS & REST API)  │
-                                  └─────────────▲─────────────┘
-                                                │
-                          HTTPS / WSS           │  HTTPS / WSS
-                       (Direct or Proxy)        │ (Direct or Proxy)
-                                                │
-                ┌───────────────────────────────┴───────────────────────────────┐
-                │                                                               │
-    ┌───────────▼────────────┐                                     ┌────────────▼───────────┐
-    │     Apple Watch        │      WatchConnectivity (WCSession)   │       iPhone Companion │
-    │   (TinyCord Watch App) │ ◄─────────────────────────────────► │          (TinyCord)    │
-    ├────────────────────────┤   Tokens, Presets, Profiles, State  ├────────────────────────┤
-    │ • DiscordGatewayClient │                                     │ • DiscordLoginWebView  │
-    │   - WebSocket Task     │                                     │ • PhoneSyncService     │
-    │   - Heartbeats & Opcodes                                     │ • QuickRepliesManager  │
-    │ • DiscordAPIClient     │                                     │ • EndpointProfileMgr   │
-    │   - REST async/await   │                                     │ • Connection Tester    │
-    │   - Multipart Uploads  │                                     │ • Local Secure Storage │
-    │ • VoiceMessageRecorder │                                     └────────────────────────┘
-    │ • Theme & Cache Engine │
-    └────────────────────────┘
+```mermaid
+flowchart LR
+    Phone[iPhone app] <-->|WatchConnectivity| Watch[Apple Watch]
+    Watch -->|HTTPS REST| Discord[Discord / configured proxy]
+    Watch <-->|HTTPS long polling| Companion[TinyCord Companion on Ubuntu]
+    Companion <-->|WSS gateway| Gateway[Discord Gateway]
 ```
 
-### 1. Gateway Client (`DiscordGatewayClient`)
-- Establishes a persistent `URLSessionWebSocketTask` with the Discord Gateway (`/gateway?v=10&encoding=json`).
-- Automatically manages heartbeat timers based on `HEARTBEAT_INTERVAL`.
-- Sends `IDENTIFY` (Opcode 2) and negotiates session resumption (`RESUME`, Opcode 6) on network re-connections.
-- Streams live events (`MESSAGE_CREATE`, `MESSAGE_UPDATE`, `MESSAGE_DELETE`, `TYPING_START`, `CHANNEL_CREATE`) directly into the SwiftUI ViewModels.
+### 1. TinyCord Companion (`PresenceClient`)
+
+- Physical watches use HTTPS only. They never create `URLSessionWebSocketTask` connections; watchOS restricts those for ordinary apps.
+- Optional [TinyCord Companion](tinycord-companion/README.md) maintains the Discord WebSocket on Ubuntu and requests “Active on Apple Watch” with a mobile client identity for user sessions.
+- Relays `MESSAGE_CREATE`, `MESSAGE_DELETE`, and `TYPING_START` using HTTPS long polling. REST polling continues if Companion is disabled or unavailable.
+- The Watch renews its lease every three seconds while active and disconnects on leaving the app. Orphaned sessions expire after ten seconds, with cleanup checked every quarter second.
+- Tokens are transient authentication input, discarded after IDENTIFY. Companion cannot reconnect without fresh authentication from the Watch. Presence appearance is controlled by Discord; the mobile indicator/activity is not guaranteed by a supported user-account API.
+- To enable it, add/edit a custom endpoint profile on iPhone or Watch, turn on **TinyCord Companion**, and enter its `https://` origin. iPhone profiles sync both settings to the Watch. Existing profiles default to off.
+- Voice recording plays the start cue, waits one second, then begins capture. Leaving the recorder during this pause cancels capture.
 
 ### 2. REST API Engine (`DiscordAPIClient`)
 - Communicates with Discord v10 REST API endpoints using modern Swift `async`/`await`.
@@ -140,8 +126,8 @@ TinyCord is built with **zero third-party dependencies**—leveraging 100% first
 
 ## 🔒 Security & Privacy
 
-- **100% On-Device**: Your Discord authentication token is stored strictly in local device storage. It is never logged, transmitted to any third-party server, or shared.
-- **Direct Traffic**: All API and Gateway traffic travels directly between your device and Discord servers (or your explicitly configured proxy).
+- **Token handling**: Tokens are saved on your devices. REST sends them to Discord or your selected proxy; enabling TinyCord Companion also sends the token to that server over HTTPS for authentication. Companion never persists or logs it and does not retain it in session state. Transient process/TLS memory is unavoidable; use only a server you trust.
+- **Traffic**: REST uses your selected API endpoints. Companion traffic uses HTTPS to your configured service; the service alone uses WSS to Discord or its operator-configured gateway proxy.
 - **Zero Telemetry**: No third-party SDKs, analytics, ads, or tracking frameworks.
 - **Export Compliance**: Uses standard HTTPS/TLS encryption only; `ITSAppUsesNonExemptEncryption` is explicitly declared as `NO`.
 
@@ -203,3 +189,16 @@ This software is **proprietary** and source-available for code review, personal 
 ## ⚠️ Disclaimer
 
 TinyCord is an independent client and is **not** affiliated, associated, authorized, endorsed by, or in any way officially connected with Discord Inc. Discord and all related trademarks and logos are the registered trademarks of Discord Inc. Use at your own discretion in compliance with Discord Terms of Service.
+
+### Chat media loading
+
+Chat media waits for the initial scroll to the latest messages, then loads only
+items intersecting the viewport, bottom-first and one at a time. Photos, animated
+stickers/GIFs, avatars and link thumbnails share this policy. Older off-screen
+media is deferred until you scroll to it; there is no history media prefetch.
+Existing memory/disk caches are reused. Downloads already started while visible
+may finish and cache their result after scrolling away. Explicitly opening a
+photo uses the detail viewer independently of the chat queue.
+
+Run `bash tests/check-chat-media.sh` to check viewport gating, bottom-first order,
+serial loading, scroll admission and cancellation behavior.

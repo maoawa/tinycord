@@ -11,6 +11,12 @@ struct EndpointConfigView: View {
     @ObservedObject private var themeManager = ThemeManager.shared
     @Environment(\.dismiss) private var dismiss
 
+    @State private var showHostSheet = false
+    @State private var inputHost: String = ""
+    @State private var presenceEnabled = false
+    @State private var presenceServerURL = ""
+    @State private var editingPresence = false
+
     var body: some View {
         ScrollView {
             VStack(spacing: 12) {
@@ -57,6 +63,24 @@ struct EndpointConfigView: View {
                         .buttonStyle(.bordered)
                         .tint(profile.id == endpointConfig.selectedProfileId ? (themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25)) : Color(white: 0.15))
                     }
+
+                    Button {
+                        inputHost = endpointConfig.activeProfile.hostDisplay
+                        presenceEnabled = false
+                        presenceServerURL = ""
+                        editingPresence = false
+                        showHostSheet = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "plus.circle")
+                                .font(.system(size: 10))
+                            Text("Set Custom Host...")
+                                .font(.system(size: 11))
+                        }
+                        .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
                 }
 
                 Divider()
@@ -88,19 +112,20 @@ struct EndpointConfigView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Gateway WebSocket URL")
-                            .font(.system(size: 8))
-                            .foregroundStyle(.secondary)
-                        Text(endpointConfig.gatewayURL)
-                            .font(.system(size: 9))
-                            .lineLimit(2)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Toggle("Real-Time Push (Gateway)", isOn: $endpointConfig.enableGateway)
+                    Text(endpointConfig.presenceEnabled ? "TinyCord Companion: \(endpointConfig.presenceHostDisplay)" : "Updates via REST polling")
+                        .font(.system(size: 9))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if !endpointConfig.activeProfile.isOfficial {
+                        Button("Configure Companion") {
+                            inputHost = endpointConfig.activeProfile.hostDisplay
+                            presenceEnabled = endpointConfig.activeProfile.presenceEnabled
+                            presenceServerURL = endpointConfig.activeProfile.presenceServerURL
+                            editingPresence = true
+                            showHostSheet = true
+                        }
                         .font(.system(size: 11))
-                    Text("Instant WebSocket push vs. REST polling")
+                    }
+                    Text("Companion shows your presence while TinyCord is active.")
                         .font(.system(size: 8))
                         .foregroundStyle(.secondary)
                 }
@@ -120,5 +145,67 @@ struct EndpointConfigView: View {
                 .foregroundStyle(themeManager.color)
                 .fontWeight(.semibold)
         }
+        .sheet(isPresented: $showHostSheet) {
+            ScrollView {
+                VStack(spacing: 10) {
+                    Text(editingPresence ? "TinyCord Companion" : "Set Custom Host")
+                        .font(.headline)
+
+                    if !editingPresence {
+                        Text("Enter base domain, e.g. proxy.example.com")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        TextField("Domain", text: $inputHost)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    Toggle("Use Companion", isOn: $presenceEnabled)
+                    if presenceEnabled {
+                        TextField("https://companion.example.com", text: $presenceServerURL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Button("Auto-fill") {
+                            autoFillCompanion()
+                        }
+                        .font(.system(size: 11))
+                        Text("Use a server you trust. It receives your token briefly to connect, then discards it.")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        if !presenceServerURL.isEmpty && EndpointProfile.validatedPresenceURL(presenceServerURL) == nil {
+                            Text("An HTTPS address without a path or query is required.")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.red)
+                        }
+                    }
+
+                    Button(editingPresence ? "Save" : "Save & Switch") {
+                        let trimmed = inputHost.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if editingPresence {
+                            endpointConfig.updatePresence(enabled: presenceEnabled, address: presenceServerURL)
+                        } else if !trimmed.isEmpty {
+                            endpointConfig.applyBaseHost(trimmed, presenceEnabled: presenceEnabled, presenceServerURL: presenceServerURL)
+                        }
+                        showHostSheet = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(themeManager.color)
+                    .disabled((!editingPresence && inputHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                              || (presenceEnabled && EndpointProfile.validatedPresenceURL(presenceServerURL) == nil))
+                }
+                .padding()
+            }
+        }
+    }
+
+    private func autoFillCompanion() {
+        let input = inputHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let address = input.contains("://") ? input : "https://\(input)"
+        guard let url = URL(string: address), var host = url.host, !host.isEmpty else { return }
+        for prefix in ["companion.", "gateway.", "cdn.", "api."] where host.lowercased().hasPrefix(prefix) {
+            host = String(host.dropFirst(prefix.count))
+            break
+        }
+        presenceServerURL = "https://companion.\(host)"
     }
 }

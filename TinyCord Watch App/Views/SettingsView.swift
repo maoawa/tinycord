@@ -14,6 +14,7 @@ struct SettingsView: View {
     @ObservedObject private var endpointConfig = EndpointConfig.shared
     @EnvironmentObject var authStore: AuthStore
     @Environment(\.dismiss) private var dismiss
+    @State private var showAccounts = false
     @State private var showTokenEditSheet = false
     @State private var cacheFootprint: String = MediaCacheService.shared.formattedDiskCacheSize()
 
@@ -24,18 +25,31 @@ struct SettingsView: View {
                 // User profile card
                 if let user = authStore.currentUser {
                     VStack(spacing: 4) {
-                        if let avatarURL = user.avatarURL(cdnBase: EndpointConfig.shared.cdnBaseURL) {
-                            CachedAsyncImage(url: avatarURL) { phase in
-                                switch phase {
-                                case .success(let img):
-                                    img.resizable().scaledToFill()
-                                default:
-                                    Circle().fill(Color.gray.opacity(0.3))
+                        Button { showAccounts = true } label: {
+                            if let avatarURL = user.avatarURL(cdnBase: EndpointConfig.shared.cdnBaseURL) {
+                                CachedAsyncImage(url: avatarURL) { phase in
+                                    switch phase {
+                                    case .success(let img):
+                                        img.resizable().scaledToFill()
+                                    default:
+                                        Circle().fill(Color.gray.opacity(0.3))
+                                    }
                                 }
+                                .frame(width: 44, height: 44)
+                                .clipShape(Circle())
                             }
-                            .frame(width: 44, height: 44)
-                            .clipShape(Circle())
                         }
+                        .buttonStyle(.plain)
+                        .overlay(alignment: .bottomTrailing) {
+                            if authStore.accounts.count > 1 {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .padding(4)
+                                    .background(themeManager.color, in: Circle())
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .accessibilityLabel("Switch account")
 
                         Text(user.displayName)
                             .font(.system(size: 14, weight: .bold))
@@ -187,8 +201,16 @@ struct SettingsView: View {
                         .padding(.horizontal)
                 }
 
+                Button { showAccounts = true } label: {
+                    Label("Accounts (\(authStore.accounts.count))", systemImage: "person.2")
+                        .font(.system(size: 12))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.bordered)
+
                 // Edit Token
                 Button {
+                    viewModel.loadCurrentValues()
                     showTokenEditSheet = true
                 } label: {
                     HStack {
@@ -265,13 +287,16 @@ struct SettingsView: View {
             }
         }
         }
+        .sheet(isPresented: $showAccounts) {
+            NavigationStack { AccountPickerView() }
+        }
         .sheet(isPresented: $showTokenEditSheet) {
             ScrollView {
                 VStack(spacing: 10) {
                     Text("Discord Token")
                         .font(.headline)
 
-                    TextField("Token", text: $viewModel.token)
+                    SecureField("Token", text: $viewModel.token)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
 

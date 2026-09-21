@@ -31,6 +31,11 @@ struct LoginView: View {
                     }
 
                     VStack(spacing: 8) {
+                        if !authStore.accounts.isEmpty {
+                            NavigationLink(destination: AccountPickerView()) {
+                                Label("Saved Accounts", systemImage: "person.2")
+                            }
+                        }
                         Button {
                             showTokenInput = true
                         } label: {
@@ -69,7 +74,7 @@ struct LoginView: View {
                         Text("Discord Token")
                             .font(.headline)
 
-                        TextField("Paste Token", text: $enteredToken)
+                        SecureField("Paste Token", text: $enteredToken)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
 

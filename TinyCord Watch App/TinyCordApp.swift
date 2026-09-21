@@ -22,7 +22,7 @@ struct TinyCord_Watch_AppApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .tint(themeManager.color)
+                .tint(themeManager.actionButtonColor)
                 .environmentObject(authStore)
                 .environmentObject(endpointConfig)
                 .environmentObject(themeManager)
@@ -34,8 +34,8 @@ struct TinyCord_Watch_AppApp: App {
                     @unknown default: break
                     }
                 }
-                .onChange(of: authStore.isAuthenticated) { _, authenticated in
-                    if authenticated { PresenceClient.shared.connect() }
+                .onChange(of: authStore.sessionID) { _, _ in
+                    if authStore.isAuthenticated { PresenceClient.shared.reconnect(force: true) }
                     else { PresenceClient.shared.disconnect() }
                 }
         }

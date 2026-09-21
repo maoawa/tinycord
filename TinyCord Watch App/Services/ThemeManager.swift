@@ -75,6 +75,11 @@ public final class ThemeManager: ObservableObject {
         currentTheme.color
     }
 
+    /// Button tint is independent of the accent used for titles and messages.
+    public var actionButtonColor: Color {
+        themeActionButtons ? color : Color(white: 0.25)
+    }
+
     public func setTheme(_ theme: AppTheme) {
         currentTheme = theme
     }

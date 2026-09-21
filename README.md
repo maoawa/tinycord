@@ -30,7 +30,7 @@ Whether you are on a run, in a meeting, or away from your phone, TinyCord gives 
   - Functions completely on Wi-Fi or Cellular without needing your iPhone nearby.
 - **Direct & Group DMs**:
   - Browse conversations with real-time unread badges, typing indicators, and message snippet previews.
-  - Opening a conversation acknowledges its latest message on Discord before clearing the Watch badge. Failed acknowledgements show an error; read/unread swipe actions have been removed.
+  - Opening a conversation acknowledges the messages loaded in the foreground chat before clearing the Watch badge. Duplicate updates are merged, and cancelled requests do not show errors. Read/unread swipe actions have been removed.
 - **Compose New Message & Friends List**:
   - Tap `+` on the home screen to access your Discord friends list.
   - **One-Tap Voice & Keyboard Search**: Search friends using watchOS dictation, scribble, or keyboard. The magnifying glass stays available after a search so you can immediately enter a new query.
@@ -69,6 +69,8 @@ Whether you are on a run, in a meeting, or away from your phone, TinyCord gives 
 
 - **Discord Web Login**:
   - In-app embedded web login sheet (`WKWebView`) that captures your session token safely and securely on-device.
+  - Loads the real `https://discord.com/login` page with iPhone WebKit's default identity. Username, current-password, and verification-code AutoFill hints are applied to Discord's login inputs, including dynamically replaced MFA forms. If no suggestion appears, use the keyboard's Passwords picker to choose a saved `discord.com` login.
+  - Discord passkeys are unavailable in this embedded login: Apple requires a `webcredentials` association authorized by Discord for TinyCord. Passwords with authenticator/backup codes remain available, along with QR sign-in when Discord offers it. A brief native alert explains this after a passkey API failure, including unavailable request preparation on older WebKit. Detection uses API signals rather than translated error text; no permanent help link is shown. A Safari login cannot transfer its session token back to the embedded view.
   - Credentials remain on your devices unless you configure a proxy or enable your own TinyCord Companion server.
 - **User Profile Display**:
   - Real-time display of authenticated avatar, nickname, `@handle`, bot tag, and live connection status.
@@ -190,6 +192,12 @@ flowchart LR
 5. Tap **Test Connection** to verify.
 6. Tap **Sync to Apple Watch** in the Apple Watch section to push your login and preferences directly to your watch.
 
+Password suggestions are controlled by iOS and your enabled password manager. Adding
+an associated-domain entitlement in TinyCord alone cannot grant access to Discord
+passkeys; Discord must also authorize the app in its website association file. See
+[Apple's passkey requirements](https://developer.apple.com/documentation/authenticationservices/supporting-passkeys)
+and [associated domains](https://developer.apple.com/documentation/xcode/supporting-associated-domains).
+
 ---
 
 ## 📄 License
@@ -219,14 +227,20 @@ serial loading, scroll admission and cancellation behavior.
 
 ### Discord read acknowledgements
 
-Opening a conversation sends an authenticated Discord REST ACK for its latest
-message before clearing the Watch badge. Failed requests leave the badge
-unchanged and display an error. There are no read/unread swipe actions.
+Opening a conversation reuses its loaded history to send an authenticated Discord
+REST ACK, without an extra history fetch. Foreground message updates advance the
+cursor; duplicate requests are merged and confirmed cursors are reused until the
+account or endpoint changes. Navigation cancellation is silent. Short rate limits
+and transient connection losses get one bounded retry, while repeated failures
+for the same cursor have a 30-second cooldown. Failed requests leave the badge
+unchanged; a newer message arriving during an ACK keeps its unread badge. There
+are no read/unread swipe actions, and bot accounts skip automatic user-only ACKs.
 These are user-account endpoints, not bot API features. The channel-list REST
 response does not include read cursors, so fetching read-state changes made on
 other clients is not yet implemented; this is not full bidirectional badge sync.
 
-Run `bash tests/check-read-state.sh` for mocked HTTP and cursor checks.
+Run `bash tests/check-read-state.sh` for mocked HTTP, cancellation, retries, cursor
+coalescing, account changes, and unread-race checks.
 
 ### Voice and endpoint checks
 
@@ -236,3 +250,9 @@ Run `bash tests/check-read-state.sh` for mocked HTTP and cursor checks.
 - `python3 tests/check-call-background.py`: Watch CallKit audio/VoIP background declarations.
 
 The native voice checks run on an Apple Silicon Mac. They use local synthetic data and do not place Discord calls. Physical-device testing is still needed for audio routes, background behavior, and call-start latency.
+
+Run `bash tests/check-discord-login.sh` (Swift and Node.js) for trusted login origins,
+AutoFill form annotations, dynamic MFA inputs, localized passkey failures, missing
+request-preparation APIs, alert deduplication, and preservation of WebAuthn results.
+These checks use synthetic fields and no real passwords or passkeys. Saved-password
+suggestions and account login still need testing on an iPhone with a password manager.

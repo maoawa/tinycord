@@ -153,6 +153,7 @@ public final class PresenceClient: ObservableObject {
         while !Task.isCancelled {
             let data = try await request(relay, path: "v1/events", method: "GET", after: cursor)
             try Task.checkCancellation()
+            guard self.relay?.credential == relay.credential else { throw CancellationError() }
             let response = try JSONDecoder().decode(EventResponse.self, from: data)
             guard response.state == "connected" else { throw RelayError(message: "Gateway disconnected. Reconnecting through HTTPS…") }
             if response.reset { resyncPublisher.send(()) }

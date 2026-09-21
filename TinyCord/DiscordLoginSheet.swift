@@ -10,6 +10,7 @@ public struct DiscordLoginSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var isLoading = true
     @State private var tokenCaptured = false
+    @State private var showPasskeyExplanation = false
 
     public init(onTokenCaptured: @escaping (String) -> Void) {
         self.onTokenCaptured = onTokenCaptured
@@ -25,9 +26,9 @@ public struct DiscordLoginSheet: View {
                         .foregroundStyle(.blue)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Log into your Discord account")
+                        Text("Log in at discord.com")
                             .font(.system(size: 13, weight: .semibold))
-                        Text("Use password, 2FA, or scan QR code. Your token is captured and stored securely only on device.")
+                        Text("Use your password and verification code, or QR sign-in when offered.")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -60,11 +61,19 @@ public struct DiscordLoginSheet: View {
                     },
                     onLoadingChanged: { loading in
                         isLoading = loading
+                    },
+                    onPasskeyUnavailable: {
+                        showPasskeyExplanation = true
                     }
                 )
             }
             .navigationTitle("Discord Login")
             .navigationBarTitleDisplayMode(.inline)
+            .alert("Passkeys unavailable", isPresented: $showPasskeyExplanation) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("iOS requires Discord to authorize passkeys for TinyCord. Use another verification method, such as an authenticator or backup code.")
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {

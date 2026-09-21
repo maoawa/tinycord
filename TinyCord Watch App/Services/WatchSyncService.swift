@@ -59,15 +59,22 @@ public final class WatchSyncService: NSObject, ObservableObject, WCSessionDelega
     }
 
     private func applyContext(_ dict: [String: Any]) {
+        let previousSession = authStore.sessionID
+        let previousConfiguration = [endpointConfig.apiBaseURL, endpointConfig.cdnBaseURL, endpointConfig.gatewayURL]
+        var profileReconnected = false
         if let token = dict["token"] as? String, !token.isEmpty {
             let isBot = dict["isBot"] as? Bool ?? false
-            authStore.setCredentials(token: token, isBot: isBot)
+            let known = authStore.accounts.contains { $0.token == token.trimmingCharacters(in: .whitespacesAndNewlines) && $0.isBot == isBot }
+            authStore.setCredentials(token: token, isBot: isBot, activate: !known)
         }
 
         if let profilesData = dict["endpointProfilesData"] as? Data,
            let profiles = try? JSONDecoder().decode([EndpointProfile].self, from: profilesData) {
             let selectedId = dict["selectedProfileId"] as? String
-            endpointConfig.updateProfiles(profiles, selectedId: selectedId)
+            if profiles != endpointConfig.profiles || (selectedId != nil && selectedId != endpointConfig.selectedProfileId) {
+                endpointConfig.updateProfiles(profiles, selectedId: selectedId)
+                profileReconnected = true
+            }
         } else {
             if let apiBase = dict["apiBaseURL"] as? String, !apiBase.isEmpty {
                 endpointConfig.apiBaseURL = apiBase
@@ -90,7 +97,8 @@ public final class WatchSyncService: NSObject, ObservableObject, WCSessionDelega
         self.syncStatusMessage = "Synced from iPhone"
 
         // Reconcile Companion with the freshly synced profile and credentials
-        if authStore.isAuthenticated {
+        if authStore.isAuthenticated, previousSession == authStore.sessionID, !profileReconnected,
+           previousConfiguration != [endpointConfig.apiBaseURL, endpointConfig.cdnBaseURL, endpointConfig.gatewayURL] {
             PresenceClient.shared.reconnect(force: true)
         }
     }

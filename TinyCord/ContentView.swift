@@ -15,6 +15,7 @@ struct ContentView: View {
     @AppStorage("ios_cdn_base") private var cdnBaseURL: String = "https://cdn.discordapp.com"
     @AppStorage("ios_gateway_url") private var gatewayURL: String = "wss://gateway.discord.gg/?v=10&encoding=json"
 
+    @State private var verifiedCredentials: String?
     @State private var isTesting: Bool = false
     @State private var testResult: String?
     @State private var testSucceeded: Bool = false
@@ -189,6 +190,10 @@ struct ContentView: View {
                     }
                 }
 
+                Text("Each account synced to your watch is saved. Switch or remove accounts in Settings → Accounts on Apple Watch.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
                 // Apple Watch Settings Section
                 Section(header: Text("Apple Watch Settings")) {
                     NavigationLink {
@@ -359,30 +364,25 @@ struct ContentView: View {
                 loadQuickReplies()
                 loadCachedProfile()
                 autoSyncToWatch()
-                if !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && userProfile == nil {
-                    Task { await testConnection() }
-                }
             }
-            .onChange(of: token) { newToken in
-                if newToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    userProfile = nil
+            .task(id: credentialIdentity) {
+                isTesting = false
+                testResult = nil
+                testSucceeded = false
+                userProfile = nil
+                verifiedCredentials = nil
+                guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     UserDefaults.standard.removeObject(forKey: "ios_cached_user_profile")
-                } else {
-                    Task { await testConnection() }
+                    return
                 }
-                autoSyncToWatch()
-            }
-            .onChange(of: isBot) { _ in
-                autoSyncToWatch()
+                do { try await Task.sleep(for: .milliseconds(700)) }
+                catch { return }
+                await testConnection()
             }
             .sheet(isPresented: $showLoginSheet) {
                 DiscordLoginSheet { capturedToken in
                     token = capturedToken
                     isBot = false
-                    Task {
-                        await testConnection()
-                        autoSyncToWatch()
-                    }
                 }
             }
             .sheet(isPresented: $showEditorSheet) {
@@ -477,7 +477,11 @@ struct ContentView: View {
         }
     }
 
+    private var credentialIdentity: String { "\(isBot):\(apiBaseURL):\(token)" }
+
     private func autoSyncToWatch() {
+        // Typing a token must not save every partial value as a watch account.
+        guard verifiedCredentials == credentialIdentity else { return }
         let cleanToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanToken.isEmpty else { return }
         syncService.syncToWatch(
@@ -506,6 +510,7 @@ struct ContentView: View {
     }
 
     private func testConnection() async {
+        let identity = credentialIdentity
         isTesting = true
         testResult = nil
         testSucceeded = false
@@ -531,6 +536,7 @@ struct ContentView: View {
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
+            guard !Task.isCancelled, identity == credentialIdentity else { return }
             guard let http = response as? HTTPURLResponse else {
                 isTesting = false
                 testResult = "Non-HTTP response"
@@ -556,6 +562,8 @@ struct ContentView: View {
                     testSucceeded = true
                     testResult = "Success! (HTTP 200)"
                 }
+                verifiedCredentials = identity
+                autoSyncToWatch()
             } else if http.statusCode == 401 {
                 isTesting = false
                 userProfile = nil
@@ -566,6 +574,7 @@ struct ContentView: View {
                 testResult = "Error \(http.statusCode)"
             }
         } catch {
+            guard !Task.isCancelled, identity == credentialIdentity else { return }
             isTesting = false
             testResult = "Network Error: \(error.localizedDescription)"
         }

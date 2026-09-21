@@ -18,9 +18,13 @@ struct ChatView: View {
     @State private var selectedPhotoItem: PhotosPickerItem? = nil
     @EnvironmentObject var authStore: AuthStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isVisible = false
+    private let onMessagesDisplayed: (String) -> Void
 
-    init(channel: DiscordChannel) {
+    init(channel: DiscordChannel, onMessagesDisplayed: @escaping (String) -> Void = { _ in }) {
         _viewModel = StateObject(wrappedValue: ChatViewModel(channel: channel))
+        self.onMessagesDisplayed = onMessagesDisplayed
     }
 
     var body: some View {
@@ -147,9 +151,9 @@ struct ChatView: View {
                             else { showCallConfirmation = true }
                         } label: {
                             Image(systemName: voiceCall.active ? "phone.fill" : "phone")
+                                .foregroundStyle(.white)
                         }
-                        .foregroundStyle(.white)
-                        .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+                        .tint(themeManager.actionButtonColor)
                         .accessibilityLabel(voiceCall.active ? "Call controls" : "Voice call")
                     }
                 }
@@ -214,6 +218,15 @@ struct ChatView: View {
             .task {
                 await viewModel.loadMessages()
                 proxy.scrollTo("bottom_anchor", anchor: .bottom)
+                acknowledgeDisplayedMessages()
+            }
+            .onAppear {
+                isVisible = true
+                acknowledgeDisplayedMessages()
+            }
+            .onChange(of: viewModel.readCursorMessageID) { _, _ in acknowledgeDisplayedMessages() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { acknowledgeDisplayedMessages() }
             }
             .onChange(of: viewModel.messages.last?.id) {
                 scrollToBottom(proxy: proxy)
@@ -258,14 +271,21 @@ struct ChatView: View {
                 }
             }
             .onDisappear {
+                isVisible = false
                 viewModel.stopPolling()
             }
         }
+        .modifier(MessageLinkBrowserModifier())
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy) {
         withAnimation(.easeOut(duration: 0.2)) {
             proxy.scrollTo("bottom_anchor", anchor: .bottom)
         }
+    }
+
+    private func acknowledgeDisplayedMessages() {
+        guard isVisible, scenePhase == .active, let messageID = viewModel.readCursorMessageID else { return }
+        onMessagesDisplayed(messageID)
     }
 }

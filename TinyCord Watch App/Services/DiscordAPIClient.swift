@@ -9,6 +9,7 @@ public enum DiscordAPIError: LocalizedError, Sendable {
     case unauthenticated
     case invalidURL(String)
     case unauthorized
+    case captchaRequired
     case forbidden
     case rateLimited(retryAfter: Double?)
     case serverError(statusCode: Int, message: String)
@@ -23,6 +24,8 @@ public enum DiscordAPIError: LocalizedError, Sendable {
             return "Invalid URL: \(url)"
         case .unauthorized:
             return "Invalid or expired token."
+        case .captchaRequired:
+            return "Discord requires CAPTCHA verification. Open the official Discord app on your iPhone to check your account before trying again."
         case .forbidden:
             return "Access forbidden (403)."
         case .rateLimited(let retryAfter):
@@ -46,6 +49,22 @@ public final class DiscordAPIClient: @unchecked Sendable {
     private let session: URLSession
     private let authStore: AuthStore
     private let endpointConfig: EndpointConfig
+    private var expectedSessionID: UUID?
+    private var expectedAPIBase: String?
+
+    /// View models retain a client bound to the account that created them.
+    public func scopedToCurrentAccount() -> DiscordAPIClient {
+        let client = DiscordAPIClient(session: session, authStore: authStore, endpointConfig: endpointConfig)
+        client.expectedSessionID = authStore.sessionID
+        client.expectedAPIBase = endpointConfig.apiBaseURL
+        return client
+    }
+
+    public func checkAccount() throws {
+        try Task.checkCancellation()
+        if let expectedSessionID, expectedSessionID != authStore.sessionID { throw CancellationError() }
+        if let expectedAPIBase, expectedAPIBase != endpointConfig.apiBaseURL { throw CancellationError() }
+    }
 
     public init(
         session: URLSession = .shared,
@@ -63,6 +82,7 @@ public final class DiscordAPIClient: @unchecked Sendable {
         queryItems: [URLQueryItem]? = nil,
         bodyData: Data? = nil
     ) throws -> URLRequest {
+        try checkAccount()
         guard let baseURL = endpointConfig.apiURL(path: path) else {
             throw DiscordAPIError.invalidURL(path)
         }
@@ -99,16 +119,28 @@ public final class DiscordAPIClient: @unchecked Sendable {
     }
 
     private func execute<T: Decodable>(_ request: URLRequest, isRetry: Bool = false) async throws -> T {
+        try checkAccount()
+        let requestSessionID = authStore.sessionID
+        guard request.value(forHTTPHeaderField: "Authorization") == authStore.authHeaderValue else { throw CancellationError() }
         let data: Data
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
         } catch {
+            if Task.isCancelled || DiscordRequestCancellation.isCancellation(error) { throw CancellationError() }
             throw DiscordAPIError.networkError(error.localizedDescription)
         }
 
+        try checkAccount()
+        guard requestSessionID == authStore.sessionID else { throw CancellationError() }
         guard let httpResponse = response as? HTTPURLResponse else {
             throw DiscordAPIError.serverError(statusCode: -1, message: "Non-HTTP response")
+        }
+
+        if httpResponse.statusCode == 400,
+           let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           body["captcha_key"] != nil {
+            throw DiscordAPIError.captchaRequired
         }
 
         switch httpResponse.statusCode {
@@ -131,8 +163,10 @@ public final class DiscordAPIClient: @unchecked Sendable {
             let retryHeader = httpResponse.value(forHTTPHeaderField: "Retry-After")
             let retrySec = retryHeader.flatMap { Double($0) }
             // Honor short rate limits transparently instead of surfacing an error.
-            if !isRetry, let retrySec, retrySec <= 10 {
-                try? await Task.sleep(nanoseconds: UInt64((retrySec + 0.25) * 1_000_000_000))
+            if !isRetry, let retrySec, retrySec.isFinite, (0...10).contains(retrySec) {
+                try await Task.sleep(for: .seconds(retrySec + 0.25))
+                try checkAccount()
+                guard requestSessionID == authStore.sessionID else { throw CancellationError() }
                 return try await execute(request, isRetry: true)
             }
             throw DiscordAPIError.rateLimited(retryAfter: retrySec)
@@ -146,10 +180,11 @@ public final class DiscordAPIClient: @unchecked Sendable {
     // MARK: - API Methods
 
     public func getCurrentUser() async throws -> DiscordUser {
+        let requestSessionID = authStore.sessionID
         let request = try makeRequest(path: "/users/@me")
         let user: DiscordUser = try await execute(request)
         await MainActor.run {
-            authStore.currentUser = user
+            authStore.updateCurrentUser(user, forSession: requestSessionID)
         }
         return user
     }
@@ -263,6 +298,9 @@ public final class DiscordAPIClient: @unchecked Sendable {
         isVoiceMessage: Bool = false,
         durationSecs: Float? = nil
     ) async throws -> DiscordMessage {
+        try checkAccount()
+        let uploadSessionID = authStore.sessionID
+        let uploadAPIBase = endpointConfig.apiBaseURL
         let boundary = "Boundary-\(UUID().uuidString)"
         let path = "/channels/\(channelId)/messages"
         guard let url = endpointConfig.apiURL(path: path) else {
@@ -330,7 +368,16 @@ public final class DiscordAPIClient: @unchecked Sendable {
             let sentMessage: DiscordMessage = try await execute(request)
             return sentMessage
         } catch {
-            if isVoiceMessage {
+            // Only an explicit invalid-flags response proves this voice payload
+            // was rejected. Never resend on CAPTCHA, auth, rate limits, or an
+            // ambiguous network failure (which may already have sent the audio).
+            if isVoiceMessage, case DiscordAPIError.serverError(let status, let message) = error,
+               status == 400, let data = message.data(using: .utf8),
+               let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let errors = body["errors"] as? [String: Any], errors["flags"] != nil {
+                try checkAccount()
+                guard uploadSessionID == authStore.sessionID,
+                      uploadAPIBase == endpointConfig.apiBaseURL else { throw CancellationError() }
                 // Retry without voice flags as standard audio attachment
                 return try await uploadAttachment(
                     channelId: channelId,

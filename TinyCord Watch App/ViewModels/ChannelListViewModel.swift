@@ -13,7 +13,6 @@ public final class ChannelListViewModel: ObservableObject {
     @Published public var isLoading: Bool = false
     @Published public var errorMessage: String?
     @Published public var readStateError: String?
-    @Published public private(set) var readStateUpdatingChannels: Set<String> = []
     @Published public var searchText: String = ""
     @Published public private(set) var typingChannelIds: Set<String> = []
 
@@ -24,8 +23,25 @@ public final class ChannelListViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var typingExpiryTasks: [String: Task<Void, Never>] = [:]
     private var snippetFetchTask: Task<Void, Never>?
+    private lazy var readAcknowledgements = DiscordReadAcknowledgements(
+        send: { [weak self] channelID, messageID in
+            guard let self, self.authStore.isAuthenticated, !self.authStore.isBotToken else { throw CancellationError() }
+            try await self.apiClient.setChannelUnread(channelId: channelID, latestMessageId: messageID, unread: false)
+        },
+        onSuccess: { [weak self] channelID, messageID in
+            guard let self, let index = self.channels.firstIndex(where: { $0.id == channelID }) else { return }
+            let latest = self.channels[index].lastMessageId ?? messageID
+            let receivedNewer = !DiscordReadAcknowledgements.covers(messageID, latest)
+            if !receivedNewer { self.channels[index].lastMessageId = messageID }
+            self.channels[index].hasUnread = receivedNewer
+            self.readStateError = nil
+        },
+        onFailure: { [weak self] _, error in
+            self?.readStateError = "Couldn't mark as read on Discord. \(error.localizedDescription)"
+        }
+    )
 
-    private let cachedSnippetsKey = "tinycord_cached_channel_snippets"
+    private let cachedSnippetsKey: String
     private var cachedSnippets: [String: CachedSnippetData] = [:]
 
     public struct CachedSnippetData: Codable {
@@ -58,11 +74,12 @@ public final class ChannelListViewModel: ObservableObject {
         authStore: AuthStore = .shared,
         endpointConfig: EndpointConfig = .shared
     ) {
-        self.apiClient = apiClient
+        self.apiClient = apiClient.scopedToCurrentAccount()
         self.presenceClient = presenceClient ?? .shared
         self.authStore = authStore
         self.endpointConfig = endpointConfig
 
+        cachedSnippetsKey = "tinycord_cached_channel_snippets.\(authStore.activeAccountID?.uuidString ?? "signed-out").\(endpointConfig.apiBaseURL)"
         loadCachedSnippets()
         setupSubscriptions()
     }
@@ -96,6 +113,10 @@ public final class ChannelListViewModel: ObservableObject {
     }
 
     private func setupSubscriptions() {
+        authStore.$token.dropFirst().sink { [weak self] _ in self?.resetReadAcknowledgements() }.store(in: &cancellables)
+        authStore.$isBotToken.dropFirst().sink { [weak self] _ in self?.resetReadAcknowledgements() }.store(in: &cancellables)
+        endpointConfig.$apiBaseURL.dropFirst().sink { [weak self] _ in self?.resetReadAcknowledgements() }.store(in: &cancellables)
+        endpointConfig.$selectedProfileId.dropFirst().sink { [weak self] _ in self?.resetReadAcknowledgements() }.store(in: &cancellables)
         presenceClient.resyncPublisher
             .sink { [weak self] in
                 Task { @MainActor in await self?.loadChannels() }
@@ -141,10 +162,11 @@ public final class ChannelListViewModel: ObservableObject {
         do {
             // Load user profile if not present
             if authStore.currentUser == nil {
-                _ = try? await apiClient.getCurrentUser()
+                _ = try await apiClient.getCurrentUser()
             }
 
             var fetched = try await apiClient.getDMChannels()
+            try apiClient.checkAccount()
 
             // Sort channels by lastMessageId descending (Discord Snowflake IDs are chronologically sortable)
             fetched.sort { c1, c2 in
@@ -209,6 +231,7 @@ public final class ChannelListViewModel: ObservableObject {
 
                 do {
                     let msgs = try await self.apiClient.getMessages(channelId: channel.id, limit: 1)
+                    try self.apiClient.checkAccount()
                     guard !Task.isCancelled, let latest = msgs.first else { continue }
 
                     await MainActor.run {
@@ -278,37 +301,13 @@ public final class ChannelListViewModel: ObservableObject {
         }
     }
 
-    public func markAsRead(channelId: String) async {
-        await setUnread(false, channelId: channelId)
+    private func resetReadAcknowledgements() {
+        readAcknowledgements.reset()
+        readStateError = nil
     }
 
-    private func setUnread(_ unread: Bool, channelId: String) async {
-        guard !readStateUpdatingChannels.contains(channelId) else { return }
-        readStateUpdatingChannels.insert(channelId)
-        defer { readStateUpdatingChannels.remove(channelId) }
-        readStateError = nil
-        let accountToken = authStore.token
-        do {
-            guard !authStore.isBotToken else {
-                throw DiscordReadStateError(message: "Read/unread syncing requires a Discord user account, not a bot token.")
-            }
-            // Fetch current history instead of relying on a stale channel-list ID.
-            guard let latest = try await apiClient.getMessages(channelId: channelId, limit: 1).first else {
-                if unread { throw DiscordReadStateError(message: "This conversation has no messages to mark unread.") }
-                return
-            }
-            guard accountToken == authStore.token else { return }
-            try await apiClient.setChannelUnread(channelId: channelId, latestMessageId: latest.id, unread: unread)
-            guard accountToken == authStore.token,
-                  let index = channels.firstIndex(where: { $0.id == channelId }) else { return }
-            // A message arriving during the ACK must not accidentally be marked read.
-            let current = channels[index].lastMessageId ?? latest.id
-            let receivedNewer = current.compare(latest.id, options: .numeric) == .orderedDescending
-            if !receivedNewer { channels[index].lastMessageId = latest.id }
-            channels[index].hasUnread = unread || receivedNewer
-        } catch {
-            guard accountToken == authStore.token else { return }
-            readStateError = "Couldn't mark as \(unread ? "unread" : "read") on Discord. \(error.localizedDescription)"
-        }
+    public func markAsRead(channelId: String, messageId: String) {
+        guard authStore.isAuthenticated, !authStore.isBotToken else { return }
+        readAcknowledgements.enqueue(channelID: channelId, messageID: messageId)
     }
 }

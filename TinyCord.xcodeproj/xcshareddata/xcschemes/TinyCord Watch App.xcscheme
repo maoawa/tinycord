@@ -17,6 +17,7 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "556DCC873051D1C90055D8E8"
                BuildableName = "TinyCord Watch App.app"
+               BlueprintName = "TinyCord Watch App"
                ReferencedContainer = "container:TinyCord.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>

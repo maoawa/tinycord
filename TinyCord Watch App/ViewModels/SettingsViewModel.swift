@@ -55,11 +55,6 @@ public final class SettingsViewModel: ObservableObject {
         testResultMessage = nil
         isTestSuccessful = false
 
-        let cleanToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !cleanToken.isEmpty {
-            authStore.setCredentials(token: cleanToken, isBot: isBot)
-        }
-
         guard authStore.isAuthenticated else {
             isTesting = false
             isTestSuccessful = false

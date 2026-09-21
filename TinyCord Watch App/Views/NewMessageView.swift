@@ -14,6 +14,7 @@ struct NewMessageView: View {
     @ObservedObject var endpointConfig = EndpointConfig.shared
     @ObservedObject var themeManager = ThemeManager.shared
 
+    @State private var apiClient = DiscordAPIClient.shared.scopedToCurrentAccount()
     @State private var relationships: [DiscordRelationship] = []
     @State private var searchText = ""
     @State private var isLoading = true
@@ -191,7 +192,8 @@ struct NewMessageView: View {
         isLoading = true
         errorMessage = nil
         do {
-            let rels = try await DiscordAPIClient.shared.getRelationships()
+            let rels = try await apiClient.getRelationships()
+            try apiClient.checkAccount()
             self.relationships = rels
             self.isLoading = false
         } catch {
@@ -204,7 +206,8 @@ struct NewMessageView: View {
         openingUserId = user.id
         Task {
             do {
-                let channel = try await DiscordAPIClient.shared.createOrGetDMChannel(recipientId: user.id)
+                let channel = try await apiClient.createOrGetDMChannel(recipientId: user.id)
+                try apiClient.checkAccount()
                 WKInterfaceDevice.current().play(.click)
                 await MainActor.run {
                     openingUserId = nil

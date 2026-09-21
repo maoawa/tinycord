@@ -96,7 +96,11 @@ struct MessageActionsSheet: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 6)
         }
-        .navigationTitle("Actions")
+        .navigationTitle {
+            Text("Actions")
+                .foregroundStyle(themeManager.color)
+                .fontWeight(.semibold)
+        }
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button {

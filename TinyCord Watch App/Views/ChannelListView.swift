@@ -138,8 +138,8 @@ struct ChannelListView: View {
                 }
             }
             .navigationDestination(for: DiscordChannel.self) { channel in
-                ChatView(channel: channel).task {
-                    await viewModel.markAsRead(channelId: channel.id)
+                ChatView(channel: channel) { messageID in
+                    viewModel.markAsRead(channelId: channel.id, messageId: messageID)
                 }
             }
             .sheet(isPresented: $showSettings) {

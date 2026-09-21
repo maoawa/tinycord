@@ -10,28 +10,36 @@ public struct DiscordLoginWebView: UIViewRepresentable {
     public let loginURL: URL
     public let onTokenCaptured: (String) -> Void
     public let onLoadingChanged: ((Bool) -> Void)?
+    public let onPasskeyUnavailable: (() -> Void)?
 
     public init(
         loginURL: URL = URL(string: "https://discord.com/login")!,
         onTokenCaptured: @escaping (String) -> Void,
-        onLoadingChanged: ((Bool) -> Void)? = nil
+        onLoadingChanged: ((Bool) -> Void)? = nil,
+        onPasskeyUnavailable: (() -> Void)? = nil
     ) {
         self.loginURL = loginURL
         self.onTokenCaptured = onTokenCaptured
         self.onLoadingChanged = onLoadingChanged
+        self.onPasskeyUnavailable = onPasskeyUnavailable
     }
 
     public func makeCoordinator() -> Coordinator {
-        Coordinator(onTokenCaptured: onTokenCaptured, onLoadingChanged: onLoadingChanged)
+        Coordinator(onTokenCaptured: onTokenCaptured, onLoadingChanged: onLoadingChanged,
+                    onPasskeyUnavailable: onPasskeyUnavailable)
     }
 
     public func makeUIView(context: Context) -> WKWebView {
         let contentController = WKUserContentController()
         contentController.add(context.coordinator, name: "discordTokenHandler")
+        contentController.add(context.coordinator, name: "discordLoginEvent")
+        contentController.addUserScript(WKUserScript(source: DiscordLoginPolicy.formSupportScript,
+                                                     injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
         // Interception script: hooks XMLHttpRequest, fetch, WebSocket, and localStorage
         let scriptSource = """
         (function() {
+            if (window.top !== window || location.origin !== 'https://discord.com') return;
             function notifyToken(raw) {
                 if (!raw || typeof raw !== 'string') return;
                 let token = raw.trim().replace(/^"|"$/g, '');
@@ -110,21 +118,24 @@ public struct DiscordLoginWebView: UIViewRepresentable {
         let userScript = WKUserScript(
             source: scriptSource,
             injectionTime: .atDocumentStart,
-            forMainFrameOnly: false
+            forMainFrameOnly: true
         )
         contentController.addUserScript(userScript)
 
         let config = WKWebViewConfiguration()
         config.userContentController = contentController
-        config.websiteDataStore = WKWebsiteDataStore.default()
+        // A fresh login can add another account instead of immediately capturing
+        // the previously signed-in account from persistent website cookies.
+        config.websiteDataStore = WKWebsiteDataStore.nonPersistent()
+        config.defaultWebpagePreferences.preferredContentMode = .mobile
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
 
-        // Use Desktop Safari User-Agent so Discord presents the full web app with QR code scanning and direct login
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-
-        let request = URLRequest(url: loginURL)
+        // Keep WebKit's real iPhone identity and the actual HTTPS origin. A fake
+        // desktop Safari UA cannot grant AutoFill or passkey domain association.
+        let request = URLRequest(url: DiscordLoginPolicy.isDiscordOrigin(loginURL)
+                                 ? loginURL : URL(string: "https://discord.com/login")!)
         webView.load(request)
 
         return webView
@@ -133,24 +144,39 @@ public struct DiscordLoginWebView: UIViewRepresentable {
     public func updateUIView(_ uiView: WKWebView, context: Context) {}
 
     public static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.stopLoading()
+        uiView.navigationDelegate = nil
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "discordTokenHandler")
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "discordLoginEvent")
     }
 
     public final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let onTokenCaptured: (String) -> Void
         let onLoadingChanged: ((Bool) -> Void)?
+        let onPasskeyUnavailable: (() -> Void)?
         private var hasCaptured = false
 
         init(
             onTokenCaptured: @escaping (String) -> Void,
-            onLoadingChanged: ((Bool) -> Void)?
+            onLoadingChanged: ((Bool) -> Void)?,
+            onPasskeyUnavailable: (() -> Void)?
         ) {
             self.onTokenCaptured = onTokenCaptured
             self.onLoadingChanged = onLoadingChanged
+            self.onPasskeyUnavailable = onPasskeyUnavailable
         }
 
         public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard !hasCaptured else { return }
+            guard !hasCaptured, message.frameInfo.isMainFrame,
+                  message.frameInfo.securityOrigin.protocol == "https",
+                  message.frameInfo.securityOrigin.host == "discord.com",
+                  [0, 443].contains(message.frameInfo.securityOrigin.port),
+                  DiscordLoginPolicy.isDiscordOrigin(message.frameInfo.request.url),
+                  DiscordLoginPolicy.isDiscordOrigin(message.webView?.url) else { return }
+            if message.name == "discordLoginEvent", message.body as? String == "passkey-unavailable" {
+                onPasskeyUnavailable?()
+                return
+            }
             if message.name == "discordTokenHandler", let tokenStr = message.body as? String {
                 let clean = tokenStr.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "")
                 guard clean.count >= 24 else { return }
@@ -170,6 +196,10 @@ public struct DiscordLoginWebView: UIViewRepresentable {
         }
 
         public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            onLoadingChanged?(false)
+        }
+
+        public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             onLoadingChanged?(false)
         }
     }

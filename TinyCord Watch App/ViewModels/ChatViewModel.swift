@@ -22,6 +22,18 @@ public final class ChatViewModel: ObservableObject {
     @Published public var typingUserNames: [String] = []
     @Published public var isLoadingOlder: Bool = false
     @Published public var hasMoreHistory: Bool = true
+    @Published public private(set) var hasLoadedMessages = false
+    private var loadedAccountToken: String?
+    private var loadedAPIBase: String?
+    private var loadedProfileID: String?
+
+    /// Excludes optimistic local messages, which have no Discord read cursor.
+    public var readCursorMessageID: String? {
+        guard hasLoadedMessages, loadedAccountToken == authStore.token,
+              loadedAPIBase == EndpointConfig.shared.apiBaseURL,
+              loadedProfileID == EndpointConfig.shared.selectedProfileId else { return nil }
+        return messages.last { $0.sendStatus == .sent && (UInt64($0.id) ?? 0) > 0 }?.id
+    }
 
     private let apiClient: DiscordAPIClient
     private let presenceClient: PresenceClient
@@ -36,7 +48,7 @@ public final class ChatViewModel: ObservableObject {
         authStore: AuthStore = .shared
     ) {
         self.channel = channel
-        self.apiClient = apiClient
+        self.apiClient = apiClient.scopedToCurrentAccount()
         self.presenceClient = presenceClient ?? .shared
         self.authStore = authStore
 
@@ -91,22 +103,35 @@ public final class ChatViewModel: ObservableObject {
     public func loadMessages() async {
         isLoading = true
         errorMessage = nil
-
-        // Ensure current user profile is available to accurately mark outgoing messages
-        if authStore.currentUser == nil {
-            _ = try? await apiClient.getCurrentUser()
-        }
+        let accountToken = authStore.token
+        let apiBase = EndpointConfig.shared.apiBaseURL
+        let profileID = EndpointConfig.shared.selectedProfileId
 
         do {
+            // Stop here if this token is rejected instead of issuing more requests.
+            if authStore.currentUser == nil {
+                _ = try await apiClient.getCurrentUser()
+            }
             var fetched = try await apiClient.getMessages(channelId: channel.id, limit: 40)
+            try Task.checkCancellation()
+            guard accountToken == authStore.token, apiBase == EndpointConfig.shared.apiBaseURL,
+                  profileID == EndpointConfig.shared.selectedProfileId else {
+                isLoading = false
+                return
+            }
             // Discord returns messages newest first; reverse so oldest is at the top, newest at bottom
             fetched.reverse()
             self.messages = fetched.map(markedAsOutgoing)
             self.hasMoreHistory = fetched.count >= 40
+            self.loadedAccountToken = accountToken
+            self.loadedAPIBase = apiBase
+            self.loadedProfileID = profileID
+            self.hasLoadedMessages = true
             self.isLoading = false
             startPollingIfNeeded()
         } catch {
             self.isLoading = false
+            guard !Task.isCancelled, !DiscordRequestCancellation.isCancellation(error) else { return }
             self.errorMessage = error.localizedDescription
         }
     }
@@ -168,8 +193,14 @@ public final class ChatViewModel: ObservableObject {
                     self.appendMessage(msg)
                 }
             }
+        } catch DiscordAPIError.unauthorized {
+            stopPolling()
+            errorMessage = "Your token is no longer valid. Check your account in Discord, then update it in Settings."
+        } catch DiscordAPIError.captchaRequired {
+            stopPolling()
+            errorMessage = DiscordAPIError.captchaRequired.localizedDescription
         } catch {
-            // Ignore poll errors quietly
+            // Transient read failures can wait for the next foreground poll.
         }
     }
 
@@ -241,6 +272,7 @@ public final class ChatViewModel: ObservableObject {
                 replyToMessageId: replyId
             )
             self.isSending = false
+            try apiClient.checkAccount()
             let marked = markedAsOutgoing(sent)
 
             if let index = self.messages.firstIndex(where: { $0.id == tempId }) {
@@ -279,6 +311,7 @@ public final class ChatViewModel: ObservableObject {
                 content: message.content,
                 replyToMessageId: replyId
             )
+            try apiClient.checkAccount()
             let marked = markedAsOutgoing(sent)
             if let index = self.messages.firstIndex(where: { $0.id == message.id }) {
                 if self.messages.contains(where: { $0.id == marked.id && $0.id != message.id }) {
@@ -356,6 +389,7 @@ public final class ChatViewModel: ObservableObject {
                 replyToMessageId: replyId
             )
             self.isSending = false
+            try apiClient.checkAccount()
             let marked = markedAsOutgoing(sent)
 
             if let index = self.messages.firstIndex(where: { $0.id == tempId }) {
@@ -427,6 +461,7 @@ public final class ChatViewModel: ObservableObject {
                 durationSecs: durationSecs
             )
             self.isSending = false
+            try apiClient.checkAccount()
             let marked = markedAsOutgoing(sent)
 
             if let index = self.messages.firstIndex(where: { $0.id == tempId }) {

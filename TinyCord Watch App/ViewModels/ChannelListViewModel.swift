@@ -41,6 +41,7 @@ public final class ChannelListViewModel: ObservableObject {
         }
     )
 
+    private let historyCache: ChatHistoryCache
     private let cachedSnippetsKey: String
     private var cachedSnippets: [String: CachedSnippetData] = [:]
 
@@ -78,9 +79,19 @@ public final class ChannelListViewModel: ObservableObject {
         self.presenceClient = presenceClient ?? .shared
         self.authStore = authStore
         self.endpointConfig = endpointConfig
+        self.historyCache = ChatHistoryCache(accountID: authStore.activeAccountID, apiBase: endpointConfig.apiBaseURL)
 
         cachedSnippetsKey = "tinycord_cached_channel_snippets.\(authStore.activeAccountID?.uuidString ?? "signed-out").\(endpointConfig.apiBaseURL)"
         loadCachedSnippets()
+        channels = historyCache.loadChannels()
+        for index in channels.indices {
+            if let snippet = cachedSnippets[channels[index].id] {
+                channels[index].lastMessageSnippet = snippet.snippet
+                channels[index].lastMessageTime = snippet.timestamp
+                channels[index].lastMessageAuthorId = snippet.authorId
+                channels[index].lastMessageAuthorName = snippet.authorName
+            }
+        }
         setupSubscriptions()
     }
 
@@ -128,6 +139,17 @@ public final class ChannelListViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] message in
                 self?.handleIncomingMessage(message)
+            }
+            .store(in: &cancellables)
+
+        presenceClient.messageDeletePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] deletion in
+                guard let self, (try? self.apiClient.checkAccount()) != nil,
+                      let cached = self.historyCache.load(channelID: deletion.channelId) else { return }
+                self.historyCache.save(channelID: deletion.channelId,
+                    messages: cached.restoredMessages.filter { $0.id != deletion.id },
+                    pending: cached.pending, hasMoreHistory: cached.hasMoreHistory)
             }
             .store(in: &cancellables)
 
@@ -192,6 +214,7 @@ public final class ChannelListViewModel: ObservableObject {
             }
 
             self.channels = fetched
+            historyCache.saveChannels(fetched)
             self.isLoading = false
 
             // Connect TinyCord Companion for live updates over HTTPS
@@ -260,7 +283,12 @@ public final class ChannelListViewModel: ObservableObject {
     }
 
     private func handleIncomingMessage(_ message: DiscordMessage) {
+        guard (try? apiClient.checkAccount()) != nil else { return }
         let channelId = message.channelId
+        if let cached = historyCache.load(channelID: channelId), !cached.messages.contains(where: { $0.id == message.id }) {
+            historyCache.save(channelID: channelId, messages: cached.restoredMessages + [message],
+                              pending: cached.pending, hasMoreHistory: cached.hasMoreHistory)
+        }
         // Our own messages synced from other devices shouldn't flag unread.
         let isOwnMessage = message.author.id == authStore.currentUser?.id
         if let index = channels.firstIndex(where: { $0.id == channelId }) {
@@ -283,6 +311,7 @@ public final class ChannelListViewModel: ObservableObject {
             )
             // Bring active channel to the top
             channels.insert(channel, at: 0)
+            historyCache.saveChannels(channels)
         }
         if !isOwnMessage {
             typingChannelIds.remove(channelId)

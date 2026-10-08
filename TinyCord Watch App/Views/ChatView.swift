@@ -20,6 +20,9 @@ struct ChatView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var isVisible = false
+    @State private var didInitialScroll = false
+    @State private var hasNewMessages = false
+    @State private var isAtBottom = false
     private let onMessagesDisplayed: (String) -> Void
 
     init(channel: DiscordChannel, onMessagesDisplayed: @escaping (String) -> Void = { _ in }) {
@@ -69,6 +72,9 @@ struct ChatView: View {
                             .foregroundStyle(.red)
                             .padding()
                     }
+                    if let error = viewModel.pendingSaveError {
+                        Text(error).font(.system(size: 11)).foregroundStyle(.red)
+                    }
 
                     // Message list
                     ForEach(viewModel.messages) { message in
@@ -90,7 +96,8 @@ struct ChatView: View {
                                 Task {
                                     await viewModel.retrySendMessage(target)
                                 }
-                            }
+                            },
+                            onDiscard: viewModel.discardFailedMessage
                         )
                         .id(message.id)
                     }
@@ -101,7 +108,8 @@ struct ChatView: View {
                             ProgressView()
                                 .scaleEffect(0.6)
                                 .frame(width: 12, height: 12)
-                            Text("\(viewModel.typingUserNames.joined(separator: ", ")) typing...")
+                            (Text(viewModel.typingUserNames.joined(separator: ", ")).bold()
+                             + Text(viewModel.typingUserNames.count == 1 ? " is typing..." : " are typing..."))
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
                         }
@@ -114,7 +122,7 @@ struct ChatView: View {
                         .frame(height: 1)
                         .id("bottom_anchor")
                         .background {
-                            if !viewModel.messages.isEmpty && !viewModel.isLoading {
+                            if !viewModel.messages.isEmpty {
                                 GeometryReader { geometry in
                                     Color.clear.preference(key: ChatMediaLayoutKey.self,
                                         value: ChatMediaLayout(bottom: geometry.frame(in: .global)))
@@ -131,9 +139,27 @@ struct ChatView: View {
                         value: ChatMediaLayout(viewport: geometry.frame(in: .global)))
                 }
             }
-            .defaultScrollAnchor(.bottom)
+            .overlay(alignment: .bottom) {
+                if hasNewMessages {
+                    Button {
+                        scrollToBottom(proxy: proxy)
+                        hasNewMessages = false
+                    } label: {
+                        Label("New messages", systemImage: "arrow.down")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(themeManager.color)
+                    .padding(.bottom, 60)
+                }
+            }
             .onPreferenceChange(ChatMediaLayoutKey.self) { layout in
                 mediaLoader.update(layout)
+                isAtBottom = layout.isVisible(layout.bottom)
+                if isAtBottom {
+                    hasNewMessages = false
+                    acknowledgeDisplayedMessages()
+                }
             }
             .environment(\.chatMediaLoader, mediaLoader)
             .navigationBarBackButtonHidden(true)
@@ -216,22 +242,28 @@ struct ChatView: View {
                 }
             }
             .task {
+                revealInitialMessages(proxy: proxy)
                 await viewModel.loadMessages()
-                proxy.scrollTo("bottom_anchor", anchor: .bottom)
                 acknowledgeDisplayedMessages()
             }
             .onAppear {
                 isVisible = true
                 acknowledgeDisplayedMessages()
             }
-            .onChange(of: viewModel.readCursorMessageID) { _, _ in acknowledgeDisplayedMessages() }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { acknowledgeDisplayedMessages() }
             }
-            .onChange(of: viewModel.messages.last?.id) {
+            .onChange(of: viewModel.localSendID) { _, _ in
                 scrollToBottom(proxy: proxy)
             }
-            .onChange(of: selectedPhotoItem) { newItem in
+            .onChange(of: viewModel.messages.last?.id) { oldID, _ in
+                if !didInitialScroll {
+                    revealInitialMessages(proxy: proxy)
+                } else if oldID != nil, viewModel.messages.last?.isOutgoing == false {
+                    hasNewMessages = true
+                }
+            }
+            .onChange(of: selectedPhotoItem) { _, newItem in
                 guard let newItem else { return }
                 selectedPhotoItem = nil
                 Task {
@@ -278,6 +310,12 @@ struct ChatView: View {
         .modifier(MessageLinkBrowserModifier())
     }
 
+    private func revealInitialMessages(proxy: ScrollViewProxy) {
+        guard !didInitialScroll, !viewModel.messages.isEmpty else { return }
+        didInitialScroll = true
+        proxy.scrollTo("bottom_anchor", anchor: .bottom)
+    }
+
     private func scrollToBottom(proxy: ScrollViewProxy) {
         withAnimation(.easeOut(duration: 0.2)) {
             proxy.scrollTo("bottom_anchor", anchor: .bottom)
@@ -285,7 +323,7 @@ struct ChatView: View {
     }
 
     private func acknowledgeDisplayedMessages() {
-        guard isVisible, scenePhase == .active, let messageID = viewModel.readCursorMessageID else { return }
+        guard isVisible, isAtBottom, scenePhase == .active, let messageID = viewModel.readCursorMessageID else { return }
         onMessagesDisplayed(messageID)
     }
 }

@@ -90,13 +90,7 @@ public final class AuthStore: ObservableObject, @unchecked Sendable {
         var next = vault
         next.accounts.removeAll { $0.id == id }
         if next.activeID == id { next.activeID = nil }
-        guard commit(next) else { return false }
-        // Snippets belong to the removed account, not to the next person signing in.
-        let prefix = "tinycord_cached_channel_snippets.\(id.uuidString)."
-        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
-            defaults.removeObject(forKey: key)
-        }
-        return true
+        return commit(next)
     }
 
     public func logout() {
@@ -121,7 +115,15 @@ public final class AuthStore: ObservableObject, @unchecked Sendable {
         if next == vault { return true }
         do {
             try storage.write(JSONEncoder().encode(next))
+            let removed = Set(vault.accounts.map(\.id)).subtracting(next.accounts.map(\.id))
             apply(next)
+            for id in removed {
+                PersistentCacheStore.removeAccount(id)
+                let prefix = "tinycord_cached_channel_snippets.\(id.uuidString)."
+                for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
+                    defaults.removeObject(forKey: key)
+                }
+            }
             storageError = nil
             return true
         } catch {

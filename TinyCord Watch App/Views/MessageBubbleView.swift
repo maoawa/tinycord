@@ -10,6 +10,7 @@ struct MessageActionsSheet: View {
     let onReply: (DiscordMessage, String) -> Void
     let onReact: (DiscordMessage, String) -> Void
     var onRetry: ((DiscordMessage) -> Void)? = nil
+    var onDiscard: ((DiscordMessage) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var themeManager = ThemeManager.shared
     @State private var showAllReactions = false
@@ -37,6 +38,14 @@ struct MessageActionsSheet: View {
                         .padding(.vertical, 4)
                     }
                     .buttonStyle(.bordered)
+
+                    if let onDiscard {
+                        Button("Discard", role: .destructive) {
+                            dismiss()
+                            onDiscard(message)
+                        }
+                        .buttonStyle(.bordered)
+                    }
                 }
 
                 // Reply Button directly invokes keyboard and sends
@@ -127,6 +136,7 @@ struct MessageBubbleView: View {
     let onReply: (DiscordMessage, String) -> Void
     let onReact: (DiscordMessage, String) -> Void
     var onRetry: ((DiscordMessage) -> Void)? = nil
+    var onDiscard: ((DiscordMessage) -> Void)? = nil
 
     @EnvironmentObject var authStore: AuthStore
     @ObservedObject var endpointConfig = EndpointConfig.shared
@@ -443,7 +453,8 @@ struct MessageBubbleView: View {
                 message: message,
                 onReply: onReply,
                 onReact: onReact,
-                onRetry: onRetry
+                onRetry: onRetry,
+                onDiscard: onDiscard
             )
         }
     }

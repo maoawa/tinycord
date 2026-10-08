@@ -53,7 +53,9 @@ public final class MediaCacheService: @unchecked Sendable {
     private let dataMemoryCache = NSCache<NSString, NSData>()
 
     private let fileManager = FileManager.default
-    private let diskCacheURL: URL
+    private let diskCacheURL: URL // Legacy cache, migrated lazily on read.
+    private let mediaDiskStore = PersistentCacheStore(directory: PersistentCacheStore.root.appendingPathComponent("media"), byteLimit: 50 * 1024 * 1024)
+    private let avatarCache = AvatarCache()
 
     private let lock = NSLock()
     private var inFlightTasks: [String: Task<MediaLoadResult, Never>] = [:]
@@ -69,11 +71,8 @@ public final class MediaCacheService: @unchecked Sendable {
         let cachesDirectory = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first!
         self.diskCacheURL = cachesDirectory.appendingPathComponent("TinyCordMediaCache", isDirectory: true)
 
-        try? fileManager.createDirectory(at: diskCacheURL, withIntermediateDirectories: true)
-
-        // Perform background cleanup of stale files (> 7 days)
         Task.detached(priority: .background) { [weak self] in
-            self?.pruneDiskCacheIfNeeded()
+            self?.migrateLegacyCache()
         }
     }
 
@@ -81,6 +80,7 @@ public final class MediaCacheService: @unchecked Sendable {
     /// For Discord attachments, normalizes by stripping ephemeral signature tokens (`ex`, `is`, `hm`)
     /// so identical files are not re-downloaded when Discord refreshes URL tokens.
     public func cacheKey(for url: URL) -> String {
+        if let avatar = AvatarCacheIdentity(url) { return sha256Hex(avatar.key) }
         let urlString = url.absoluteString
 
         // For Discord attachments, use host + path as canonical key
@@ -150,6 +150,8 @@ public final class MediaCacheService: @unchecked Sendable {
         imageMemoryCache.removeObject(forKey: key as NSString)
         let fileURL = diskFileURL(for: key)
         try? fileManager.removeItem(at: fileURL)
+        mediaDiskStore.remove(key)
+        if let identity = AvatarCacheIdentity(url) { avatarCache.remove(identity) }
 
         let unproxied = Self.unwrapProxiedURL(url)
         if unproxied != url {
@@ -157,13 +159,14 @@ public final class MediaCacheService: @unchecked Sendable {
             dataMemoryCache.removeObject(forKey: unKey as NSString)
             imageMemoryCache.removeObject(forKey: unKey as NSString)
             try? fileManager.removeItem(at: diskFileURL(for: unKey))
+            mediaDiskStore.remove(unKey)
         }
     }
 
     // MARK: - Asynchronous Loading
 
     public func fetchMedia(from rawURL: URL) async -> MediaLoadResult {
-        let url = Self.unwrapProxiedURL(rawURL)
+        let url = AvatarCacheIdentity(rawURL)?.downloadURL ?? Self.unwrapProxiedURL(rawURL)
         let key = cacheKey(for: url)
         let nsKey = key as NSString
 
@@ -176,17 +179,10 @@ public final class MediaCacheService: @unchecked Sendable {
             }
         }
 
-        // 2. Check disk cache
-        let fileURL = diskFileURL(for: key)
-        if fileManager.fileExists(atPath: fileURL.path),
-           let diskData = try? Data(contentsOf: fileURL) {
-            if isLikelyHTML(diskData) {
-                print("[TinyCord Media] Evicting corrupt HTML error from disk cache for \(url)")
-                try? fileManager.removeItem(at: fileURL)
-            } else {
-                dataMemoryCache.setObject(diskData as NSData, forKey: nsKey, cost: diskData.count)
-                return .success(data: diskData, resolvedURL: url != rawURL ? url : nil)
-            }
+        // 2. Persistent disk cache, with migration from earlier releases.
+        if let diskData = cachedDiskData(for: url, key: key) {
+            dataMemoryCache.setObject(diskData as NSData, forKey: nsKey, cost: diskData.count)
+            return .success(data: diskData, resolvedURL: url != rawURL ? url : nil)
         }
 
         // 3. Resolve Klipy webpage URLs if needed
@@ -206,15 +202,9 @@ public final class MediaCacheService: @unchecked Sendable {
                     dataMemoryCache.setObject(memoryData as NSData, forKey: nsKey, cost: memoryData.count)
                     return .success(data: memoryData, resolvedURL: direct)
                 }
-                let directDiskURL = diskFileURL(for: directKey)
-                if fileManager.fileExists(atPath: directDiskURL.path),
-                   let diskData = try? Data(contentsOf: directDiskURL) {
-                    if isLikelyHTML(diskData) {
-                        try? fileManager.removeItem(at: directDiskURL)
-                    } else {
-                        dataMemoryCache.setObject(diskData as NSData, forKey: nsKey, cost: diskData.count)
-                        return .success(data: diskData, resolvedURL: direct)
-                    }
+                if let diskData = cachedDiskData(for: direct, key: directKey) {
+                    dataMemoryCache.setObject(diskData as NSData, forKey: nsKey, cost: diskData.count)
+                    return .success(data: diskData, resolvedURL: direct)
                 }
 
             case .failure(let reason):
@@ -298,20 +288,16 @@ public final class MediaCacheService: @unchecked Sendable {
                     return .failure(fail)
                 }
 
-                // Cache in memory
-                self?.dataMemoryCache.setObject(data as NSData, forKey: nsKey, cost: data.count)
-
-                // Cache on disk asynchronously
-                if let diskURL = self?.diskFileURL(for: key) {
-                    try? data.write(to: diskURL, options: .atomic)
+                // Do not persist successful HTTP responses that are invalid avatars.
+                if AvatarCacheIdentity(url) != nil && UIImage(data: data) == nil {
+                    return .failure(MediaLoadFailure(url: rawURL, errorDescription: "Invalid avatar image"))
                 }
-
-                // Also cache under direct media key if redirected
+                self?.dataMemoryCache.setObject(data as NSData, forKey: nsKey, cost: data.count)
+                self?.saveDiskData(data, for: url, key: key)
                 if targetURL != url, let self {
                     let directKey = self.cacheKey(for: targetURL)
                     self.dataMemoryCache.setObject(data as NSData, forKey: directKey as NSString, cost: data.count)
-                    let directDiskURL = self.diskFileURL(for: directKey)
-                    try? data.write(to: directDiskURL, options: .atomic)
+                    self.saveDiskData(data, for: targetURL, key: directKey)
                 }
 
                 print("[TinyCord Media] Successfully loaded \(data.count) bytes for \(targetURL)")
@@ -356,9 +342,14 @@ public final class MediaCacheService: @unchecked Sendable {
         }
 
         // Load data (from disk or network)
-        guard let data = await loadData(from: url) else { return nil }
+        guard let data = await loadData(from: url) else {
+            return offlineImage(for: url)
+        }
 
-        guard let image = UIImage(data: data) else { return nil }
+        guard let image = UIImage(data: data) else {
+            evictCache(for: url)
+            return offlineImage(for: url)
+        }
 
         // Cache image object in memory
         let cost = Int(image.size.width * image.size.height * 4)
@@ -367,78 +358,92 @@ public final class MediaCacheService: @unchecked Sendable {
         return image
     }
 
+    /// Used before the visible-media network queue so an offline avatar appears
+    /// immediately and stays visible while refreshing a changed avatar hash.
+    public func offlineImage(for url: URL) -> UIImage? {
+        if let image = imageFromMemory(for: url) { return image }
+        guard let identity = AvatarCacheIdentity(url) else { return nil }
+        if let data = cachedDiskData(for: url, key: cacheKey(for: url)), let image = UIImage(data: data) {
+            imageMemoryCache.setObject(image, forKey: cacheKey(for: url) as NSString,
+                                      cost: Int(image.size.width * image.size.height * 4))
+            return image
+        }
+        return avatarCache.data(for: identity, fallback: true).flatMap { UIImage(data: $0) }
+    }
+
+    private func cachedDiskData(for url: URL, key: String) -> Data? {
+        if let identity = AvatarCacheIdentity(url), let data = avatarCache.data(for: identity) {
+            if UIImage(data: data) != nil { return data }
+            avatarCache.remove(identity)
+        }
+        if let identity = AvatarCacheIdentity(url) {
+            // Older releases keyed avatars by the complete URL, including size.
+            // Recover those files even on the first launch of this version offline.
+            for size in [128, 64] {
+                var components = URLComponents(url: identity.downloadURL, resolvingAgainstBaseURL: false)!
+                components.queryItems = (components.queryItems ?? []).filter { $0.name != "size" }
+                    + [URLQueryItem(name: "size", value: String(size))]
+                let legacyKey = sha256Hex(components.url!.absoluteString)
+                if let data = mediaDiskStore.read(legacyKey) ?? (try? Data(contentsOf: diskFileURL(for: legacyKey))),
+                   UIImage(data: data) != nil {
+                    avatarCache.save(data, for: identity)
+                    return data
+                }
+            }
+        }
+        if let data = mediaDiskStore.read(key) {
+            if !isLikelyHTML(data), !data.isEmpty { return data }
+            mediaDiskStore.remove(key)
+        }
+        let legacy = diskFileURL(for: key)
+        guard let data = try? Data(contentsOf: legacy) else { return nil }
+        defer { try? fileManager.removeItem(at: legacy) }
+        guard !isLikelyHTML(data), !data.isEmpty else { return nil }
+        saveDiskData(data, for: url, key: key)
+        return data
+    }
+
+    private func saveDiskData(_ data: Data, for url: URL, key: String) {
+        if let identity = AvatarCacheIdentity(url) {
+            if UIImage(data: data) != nil { avatarCache.save(data, for: identity) }
+        } else {
+            mediaDiskStore.write(data, key: key)
+        }
+    }
+
+    private func migrateLegacyCache() {
+        let files = (try? fileManager.contentsOfDirectory(at: diskCacheURL,
+            includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let oldestFirst = files.sorted {
+            ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+                < ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+        }
+        for file in oldestFirst {
+            guard let data = try? Data(contentsOf: file) else { continue }
+            if isLikelyHTML(data) || data.isEmpty || mediaDiskStore.write(data, key: file.lastPathComponent) {
+                try? fileManager.removeItem(at: file)
+            }
+        }
+    }
+
     // MARK: - Disk Cache Management
 
     public func clearCache() {
         imageMemoryCache.removeAllObjects()
         dataMemoryCache.removeAllObjects()
-
+        avatarCache.clear()
+        mediaDiskStore.clear()
         try? fileManager.removeItem(at: diskCacheURL)
-        try? fileManager.createDirectory(at: diskCacheURL, withIntermediateDirectories: true)
     }
 
     public func diskCacheSizeInBytes() -> Int64 {
-        guard let contents = try? fileManager.contentsOfDirectory(at: diskCacheURL, includingPropertiesForKeys: [.fileSizeKey]) else {
-            return 0
-        }
-        var total: Int64 = 0
-        for file in contents {
-            if let attrs = try? file.resourceValues(forKeys: [.fileSizeKey]),
-               let size = attrs.fileSize {
-                total += Int64(size)
-            }
-        }
-        return total
+        let legacyFiles = (try? fileManager.contentsOfDirectory(at: diskCacheURL, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+        let legacySize = legacyFiles.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+        return Int64(avatarCache.size + mediaDiskStore.size + legacySize)
     }
 
     public func formattedDiskCacheSize() -> String {
-        let bytes = diskCacheSizeInBytes()
-        if bytes < 1024 {
-            return "\(bytes) B"
-        } else if bytes < 1024 * 1024 {
-            return String(format: "%.1f KB", Double(bytes) / 1024.0)
-        } else {
-            return String(format: "%.1f MB", Double(bytes) / (1024.0 * 1024.0))
-        }
-    }
-
-    private func pruneDiskCacheIfNeeded() {
-        guard let files = try? fileManager.contentsOfDirectory(
-            at: diskCacheURL,
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
-        ) else { return }
-
-        let now = Date()
-        let maxAge: TimeInterval = 7 * 24 * 60 * 60 // 7 days
-        var totalSize: Int64 = 0
-        var fileList: [(url: URL, date: Date, size: Int64)] = []
-
-        for file in files {
-            guard let vals = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
-                  let date = vals.contentModificationDate,
-                  let size = vals.fileSize else { continue }
-
-            let s = Int64(size)
-            if now.timeIntervalSince(date) > maxAge {
-                try? fileManager.removeItem(at: file)
-            } else {
-                totalSize += s
-                fileList.append((url: file, date: date, size: s))
-            }
-        }
-
-        // If total size exceeds 50MB, prune oldest files
-        let maxTotalSize: Int64 = 50 * 1024 * 1024
-        if totalSize > maxTotalSize {
-            fileList.sort { $0.date < $1.date }
-            for entry in fileList {
-                try? fileManager.removeItem(at: entry.url)
-                totalSize -= entry.size
-                if totalSize <= maxTotalSize / 2 {
-                    break
-                }
-            }
-        }
+        ByteCountFormatter.string(fromByteCount: diskCacheSizeInBytes(), countStyle: .file)
     }
 }
 

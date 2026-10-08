@@ -17,6 +17,11 @@ struct SettingsView: View {
     @State private var showAccounts = false
     @State private var showTokenEditSheet = false
     @State private var cacheFootprint: String = MediaCacheService.shared.formattedDiskCacheSize()
+    @State private var historyFootprint: String = ""
+
+    private var historyCache: ChatHistoryCache {
+        ChatHistoryCache(accountID: authStore.activeAccountID, apiBase: endpointConfig.apiBaseURL)
+    }
 
     var body: some View {
         NavigationStack {
@@ -245,6 +250,28 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+
+                // Saved history can be cleared without losing unsent messages.
+                Button {
+                    historyCache.clearDownloadedHistory()
+                    historyFootprint = historyCache.formattedSize
+                } label: {
+                    HStack {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                        Text("Chat History").font(.system(size: 12))
+                        Spacer()
+                        Text(historyFootprint).font(.system(size: 10)).foregroundStyle(.secondary)
+                        Image(systemName: "trash").font(.system(size: 10)).foregroundStyle(.secondary)
+                    }
+                    .foregroundStyle(.white)
+                }
+                .buttonStyle(.bordered)
+                .tint(themeManager.actionButtonColor)
+                .onAppear { historyFootprint = historyCache.formattedSize }
+
+                Text("Saved messages and avatars work offline. Clearing history keeps unsent messages.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
 
                 // iPhone Sync info
                 HStack(spacing: 4) {

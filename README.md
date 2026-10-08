@@ -218,17 +218,50 @@ Chat media waits for the initial scroll to the latest messages, then loads only
 items intersecting the viewport, bottom-first and one at a time. Photos, animated
 stickers/GIFs, avatars and link thumbnails share this policy. Older off-screen
 media is deferred until you scroll to it; there is no history media prefetch.
-Existing memory/disk caches are reused. Downloads already started while visible
+Cached avatars render immediately, independently of the download queue. Downloads already started while visible
 may finish and cache their result after scrolling away. Explicitly opening a
 photo uses the detail viewer independently of the chat queue.
 
 Run `bash tests/check-chat-media.sh` to check viewport gating, bottom-first order,
 serial loading, scroll admission and cancellation behavior.
 
+### Offline chats and reliable retries
+
+Conversations open from saved history before refreshing online. Each account has
+20 MB of downloaded history (up to 200 messages per chat), plus a separate 2 MB
+channel list. History is isolated by account and API endpoint. Refreshes reconcile
+edits/deletions in the fetched page and retain older contiguous cached history;
+live arrivals and deletions during a refresh are preserved. Fetch failures keep
+the saved conversation visible, with foreground retries when connectivity returns.
+Older messages remain available through **Load earlier** when online.
+
+Avatars have a separate 12 MB cache, and other downloaded media has a 50 MB cache.
+Files live in Application Support, excluded from backups. There is no seven-day
+expiry: size limits evict the least recently accessed files. Avatar sizes share a
+128-pixel copy; a changed avatar hash downloads a new image while the last known
+image stays visible offline. Old media caches migrate on upgrade. Only previously
+loaded images are available offline; deleted/evicted media needs a connection.
+
+Failed text, photo, and voice sends retain their original payload and reply target
+across reopening/relaunching. Voice retries upload the audio bytes, filename,
+duration, and voice flag. Unsent messages live in a separate outbox that cache
+cleanup does not evict; use **Retry Send** or **Discard** in message actions.
+Removing an account deletes its saved history and outbox. Settings offers separate
+media and history cleanup, while clearing history preserves unsent content.
+
+Incoming messages leave the reading position alone, including during input or
+recording. Tap **New messages** to move down; initial opening and an explicit local
+send still show the latest message. Typing indicators use **name** is typing…,
+or **names** are typing… for multiple people.
+
+Run `bash tests/check-chat-reliability.sh` for disk retention and budgets, offline
+history/avatars, account and endpoint isolation, history reconciliation, and actual
+mocked multipart voice/photo retries after failures and reopening.
+
 ### Discord read acknowledgements
 
 Opening a conversation reuses its loaded history to send an authenticated Discord
-REST ACK, without an extra history fetch. Foreground message updates advance the
+REST ACK, without an extra history fetch. Messages visible at the bottom of a foreground conversation advance the
 cursor; duplicate requests are merged and confirmed cursors are reused until the
 account or endpoint changes. Navigation cancellation is silent. Short rate limits
 and transient connection losses get one bounded retry, while repeated failures

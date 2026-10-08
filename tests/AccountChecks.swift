@@ -74,7 +74,11 @@ struct AccountChecks {
         precondition(auth.accounts.count == 2 && !auth.accounts.contains { $0.token == "legacy-token" })
         let restored = AuthStore(defaults: defaults, storage: storage)
         precondition(restored.token == "replacement-token" && restored.accounts.count == 2)
+        let removedID = restored.activeAccountID!
+        let removedCache = PersistentCacheStore(directory: PersistentCacheStore.root.appendingPathComponent("accounts/\(removedID.uuidString)/history"), byteLimit: 32)
+        removedCache.write(Data("private".utf8), key: "history")
         restored.logout()
+        precondition(removedCache.read("history") == nil, "Removing an account must delete its offline history")
         precondition(!restored.isAuthenticated && restored.accounts.count == 1)
         precondition(restored.selectAccount(id: secondID) && restored.isBotToken)
 

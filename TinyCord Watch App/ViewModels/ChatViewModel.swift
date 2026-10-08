@@ -18,11 +18,15 @@ public final class ChatViewModel: ObservableObject {
     @Published public var isLoading: Bool = false
     @Published public var isSending: Bool = false
     @Published public var errorMessage: String?
+    @Published public private(set) var pendingSaveError: String?
+    @Published public private(set) var localSendID: String?
     @Published public var replyingTo: DiscordMessage?
     @Published public var typingUserNames: [String] = []
     @Published public var isLoadingOlder: Bool = false
     @Published public var hasMoreHistory: Bool = true
     @Published public private(set) var hasLoadedMessages = false
+    private let historyCache: ChatHistoryCache
+    private var pendingPayloads: [String: OutgoingMessagePayload] = [:]
     private var loadedAccountToken: String?
     private var loadedAPIBase: String?
     private var loadedProfileID: String?
@@ -40,18 +44,32 @@ public final class ChatViewModel: ObservableObject {
     private let authStore: AuthStore
     private var cancellables = Set<AnyCancellable>()
     private var typingResetTask: Task<Void, Never>?
+    private var needsHistoryRefresh = false
+    private var deletedDuringRefresh = Set<String>()
 
     public init(
         channel: DiscordChannel,
         apiClient: DiscordAPIClient = .shared,
         presenceClient: PresenceClient? = nil,
-        authStore: AuthStore = .shared
+        authStore: AuthStore = .shared,
+        cacheDirectory: URL? = nil
     ) {
         self.channel = channel
         self.apiClient = apiClient.scopedToCurrentAccount()
         self.presenceClient = presenceClient ?? .shared
         self.authStore = authStore
-
+        self.historyCache = ChatHistoryCache(accountID: authStore.activeAccountID, apiBase: EndpointConfig.shared.apiBaseURL,
+                                             root: cacheDirectory ?? PersistentCacheStore.root)
+        historyCache.rememberChannel(channel)
+        if let cached = historyCache.load(channelID: channel.id) {
+            pendingPayloads = cached.pending
+            messages = cached.restoredMessages.map(markedAsOutgoing)
+            hasMoreHistory = cached.hasMoreHistory
+            hasLoadedMessages = true
+            loadedAccountToken = authStore.token
+            loadedAPIBase = EndpointConfig.shared.apiBaseURL
+            loadedProfileID = EndpointConfig.shared.selectedProfileId
+        }
         setupPresenceSubscriptions()
     }
 
@@ -69,7 +87,7 @@ public final class ChatViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] message in
                 guard let self else { return }
-                if message.channelId == self.channel.id {
+                if (try? self.apiClient.checkAccount()) != nil, message.channelId == self.channel.id {
                     self.appendMessage(message)
                 }
             }
@@ -80,8 +98,10 @@ public final class ChatViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] del in
                 guard let self else { return }
-                if del.channelId == self.channel.id {
+                if (try? self.apiClient.checkAccount()) != nil, del.channelId == self.channel.id {
+                    if self.isLoading { self.deletedDuringRefresh.insert(del.id) }
                     self.messages.removeAll { $0.id == del.id }
+                    self.saveHistory()
                 }
             }
             .store(in: &cancellables)
@@ -101,7 +121,10 @@ public final class ChatViewModel: ObservableObject {
     private var pollTask: Task<Void, Never>?
 
     public func loadMessages() async {
+        guard !isLoading, (try? apiClient.checkAccount()) != nil else { return }
         isLoading = true
+        deletedDuringRefresh.removeAll()
+        let existingIDs = Set(messages.map(\.id))
         errorMessage = nil
         let accountToken = authStore.token
         let apiBase = EndpointConfig.shared.apiBaseURL
@@ -121,8 +144,20 @@ public final class ChatViewModel: ObservableObject {
             }
             // Discord returns messages newest first; reverse so oldest is at the top, newest at bottom
             fetched.reverse()
-            self.messages = fetched.map(markedAsOutgoing)
-            self.hasMoreHistory = fetched.count >= 40
+            let pageCount = fetched.count
+            fetched.removeAll { deletedDuringRefresh.contains($0.id) }
+            let fetchedIDs = Set(fetched.map(\.id))
+            let liveArrivals = messages.filter {
+                $0.sendStatus == .sent && !existingIDs.contains($0.id) && !fetchedIDs.contains($0.id)
+            }
+            let merged = CachedChat.mergingLatest(fetched.map(markedAsOutgoing), into: messages, pageSize: 40, fetchedCount: pageCount)
+            let mergedIDs = Set(merged.map(\.id))
+            let confirmed = (merged.filter { $0.sendStatus == .sent } + liveArrivals.filter { !mergedIDs.contains($0.id) })
+                .sorted { (UInt64($0.id) ?? 0) < (UInt64($1.id) ?? 0) }
+            self.messages = confirmed + merged.filter { $0.sendStatus != .sent }
+            self.hasMoreHistory = pageCount >= 40 && (hasMoreHistory || confirmed.count <= pageCount + liveArrivals.count)
+            needsHistoryRefresh = false
+            saveHistory()
             self.loadedAccountToken = accountToken
             self.loadedAPIBase = apiBase
             self.loadedProfileID = profileID
@@ -132,13 +167,22 @@ public final class ChatViewModel: ObservableObject {
         } catch {
             self.isLoading = false
             guard !Task.isCancelled, !DiscordRequestCancellation.isCancellation(error) else { return }
-            self.errorMessage = error.localizedDescription
+            self.errorMessage = messages.isEmpty ? error.localizedDescription : "Showing saved messages. " + error.localizedDescription
+            if case DiscordAPIError.unauthorized = error { stopPolling() }
+            else if case DiscordAPIError.captchaRequired = error { stopPolling() }
+            else { needsHistoryRefresh = true; startPollingIfNeeded() }
         }
+    }
+
+    private func saveHistory() {
+        guard (try? apiClient.checkAccount()) != nil else { return }
+        let saved = historyCache.save(channelID: channel.id, messages: messages, pending: pendingPayloads, hasMoreHistory: hasMoreHistory)
+        pendingSaveError = saved ? nil : "Couldn't save the unsent attachment. Keep this chat open to retry."
     }
 
     /// Fetches the next page of older messages and prepends them.
     public func loadOlderMessages() async {
-        guard !isLoadingOlder, hasMoreHistory, let oldest = messages.first else { return }
+        guard !isLoadingOlder, hasMoreHistory, let oldest = messages.first(where: { $0.sendStatus == .sent }) else { return }
 
         isLoadingOlder = true
         defer { isLoadingOlder = false }
@@ -147,6 +191,7 @@ public final class ChatViewModel: ObservableObject {
             var older = try await apiClient.getMessages(channelId: channel.id, limit: 40, before: oldest.id)
             if older.isEmpty {
                 hasMoreHistory = false
+                saveHistory()
                 return
             }
             older.reverse()
@@ -156,20 +201,22 @@ public final class ChatViewModel: ObservableObject {
             let existingIds = Set(messages.map(\.id))
             let fresh = older.map(markedAsOutgoing).filter { !existingIds.contains($0.id) }
             messages.insert(contentsOf: fresh, at: 0)
+            saveHistory()
         } catch {
             self.errorMessage = error.localizedDescription
         }
     }
 
     public func startPollingIfNeeded() {
-        pollTask?.cancel()
+        guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 8_000_000_000)
                 guard let self, !Task.isCancelled else { break }
                 // REST remains the fallback when TinyCord Companion is unavailable.
-                if self.presenceClient.state != .connected {
-                    await self.pollLatestMessages()
+                if self.presenceClient.state != .connected || self.needsHistoryRefresh {
+                    if self.needsHistoryRefresh { await self.loadMessages() }
+                    else { await self.pollLatestMessages() }
                 }
                 // Companion does not forward MESSAGE_UPDATE. Refresh unfinished
                 // call records over HTTPS even while its event stream is healthy.
@@ -193,6 +240,7 @@ public final class ChatViewModel: ObservableObject {
                     self.appendMessage(msg)
                 }
             }
+            saveHistory()
         } catch DiscordAPIError.unauthorized {
             stopPolling()
             errorMessage = "Your token is no longer valid. Check your account in Discord, then update it in Settings."
@@ -207,7 +255,7 @@ public final class ChatViewModel: ObservableObject {
     private func markedAsOutgoing(_ message: DiscordMessage) -> DiscordMessage {
         var msg = message
         if let currentUserId = authStore.currentUser?.id {
-            msg.isOutgoing = (msg.author.id == currentUserId)
+            msg.isOutgoing = msg.sendStatus != .sent || msg.author.id == currentUserId
         }
         return msg
     }
@@ -220,113 +268,90 @@ public final class ChatViewModel: ObservableObject {
                   !Task.isCancelled,
                   let index = messages.firstIndex(where: { $0.id == message.id }) else { continue }
             messages[index] = markedAsOutgoing(updated)
+            saveHistory()
         }
     }
 
     public func sendMessage(text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        await enqueue(.text(trimmed), preview: trimmed)
+    }
 
-        let tempId = "temp_\(UUID().uuidString)"
-        let replyTarget = replyingTo
-        let replyId = replyTarget?.id
+    public func sendPhotoMessage(imageData: Data, filename: String = "photo.jpg") async {
+        await enqueue(.attachment(data: imageData, filename: filename, mimeType: "image/jpeg",
+                                  isVoiceMessage: false, durationSecs: nil), preview: "📷 Photo")
+    }
 
-        let author = authStore.currentUser ?? DiscordUser(
-            id: "me",
-            username: "Me",
-            discriminator: nil,
-            globalName: "Me",
-            avatar: nil,
-            bot: false,
-            system: false,
-            accentColor: nil,
-            banner: nil
-        )
+    public func sendVoiceMessage(audioData: Data, durationSecs: Float, filename: String = "voice-message.m4a") async {
+        await enqueue(.attachment(data: audioData, filename: filename, mimeType: "audio/m4a",
+                                  isVoiceMessage: true, durationSecs: durationSecs),
+                      preview: "🎤 Voice Message (\(Int(durationSecs))s)")
+    }
 
-        let optimisticMessage = DiscordMessage(
-            id: tempId,
-            channelId: channel.id,
-            author: author,
-            content: trimmed,
+    private func enqueue(_ payload: OutgoingMessagePayload, preview: String) async {
+        guard (try? apiClient.checkAccount()) != nil else { return }
+        let tempID = "temp_\(UUID().uuidString)"
+        let target = replyingTo
+        let author = authStore.currentUser ?? DiscordUser(id: "me", username: "Me", discriminator: nil,
+            globalName: "Me", avatar: nil, bot: false, system: false, accentColor: nil, banner: nil)
+        let message = DiscordMessage(id: tempID, channelId: channel.id, author: author, content: preview,
             timestamp: DiscordMessage.isoFormatterStandard.string(from: Date()),
-            editedTimestamp: nil,
-            attachments: nil,
-            embeds: nil,
-            messageReference: replyId != nil ? MessageReference(messageId: replyId, channelId: channel.id, guildId: nil) : nil,
-            referencedMessage: replyTarget != nil ? ReferencedMessageWrapper(message: replyTarget) : nil,
-            reactions: nil,
-            pinned: false,
-            isOutgoing: true,
-            sendStatus: .sending
-        )
-
-        // Immediately show preview
-        self.messages.append(optimisticMessage)
-        self.replyingTo = nil
-        self.isSending = true
-
-        do {
-            let sent = try await apiClient.sendMessage(
-                channelId: channel.id,
-                content: trimmed,
-                replyToMessageId: replyId
-            )
-            self.isSending = false
-            try apiClient.checkAccount()
-            let marked = markedAsOutgoing(sent)
-
-            if let index = self.messages.firstIndex(where: { $0.id == tempId }) {
-                if self.messages.contains(where: { $0.id == marked.id && $0.id != tempId }) {
-                    self.messages.remove(at: index)
-                } else {
-                    self.messages[index] = marked
-                }
-            } else if !self.messages.contains(where: { $0.id == marked.id }) {
-                self.messages.append(marked)
-            }
-
-            // Notify message listeners so channel snippet & position update immediately
-            PresenceClient.shared.messageCreatePublisher.send(marked)
-        } catch {
-            self.isSending = false
-            self.errorMessage = error.localizedDescription
-
-            if let index = self.messages.firstIndex(where: { $0.id == tempId }) {
-                self.messages[index].sendStatus = .failed
-            }
-        }
+            messageReference: target.map { MessageReference(messageId: $0.id, channelId: channel.id, guildId: nil) },
+            referencedMessage: target.map { ReferencedMessageWrapper(message: $0) },
+            isOutgoing: true, sendStatus: .sending)
+        pendingPayloads[tempID] = payload
+        messages.append(message)
+        localSendID = tempID
+        replyingTo = nil
+        saveHistory()
+        await transmit(message, payload: payload)
     }
 
     public func retrySendMessage(_ message: DiscordMessage) async {
-        guard message.sendStatus == .failed else { return }
-
-        if let index = self.messages.firstIndex(where: { $0.id == message.id }) {
-            self.messages[index].sendStatus = .sending
+        // Consult the live row so repeated taps cannot upload the same file twice.
+        guard let current = messages.first(where: { $0.id == message.id }), current.sendStatus == .failed else { return }
+        guard let payload = pendingPayloads[current.id] else {
+            errorMessage = "The original message is unavailable. Please compose it again."
+            return
         }
+        await transmit(current, payload: payload)
+    }
 
-        let replyId = message.messageReference?.messageId
+    public func discardFailedMessage(_ message: DiscordMessage) {
+        guard messages.contains(where: { $0.id == message.id && $0.sendStatus == .failed }) else { return }
+        messages.removeAll { $0.id == message.id }
+        pendingPayloads.removeValue(forKey: message.id)
+        saveHistory()
+    }
+
+    private func transmit(_ message: DiscordMessage, payload: OutgoingMessagePayload) async {
+        guard let index = messages.firstIndex(where: { $0.id == message.id }),
+              (try? apiClient.checkAccount()) != nil else { return }
+        messages[index].sendStatus = .sending
+        isSending = true
+        errorMessage = nil
+        defer { isSending = messages.contains { $0.sendStatus == .sending } }
         do {
-            let sent = try await apiClient.sendMessage(
-                channelId: channel.id,
-                content: message.content,
-                replyToMessageId: replyId
-            )
+            let sent = try await payload.send(using: apiClient, channelID: channel.id,
+                                              replyID: message.messageReference?.messageId)
             try apiClient.checkAccount()
             let marked = markedAsOutgoing(sent)
-            if let index = self.messages.firstIndex(where: { $0.id == message.id }) {
-                if self.messages.contains(where: { $0.id == marked.id && $0.id != message.id }) {
-                    self.messages.remove(at: index)
-                } else {
-                    self.messages[index] = marked
-                }
-            } else if !self.messages.contains(where: { $0.id == marked.id }) {
-                self.messages.append(marked)
+            if let index = messages.firstIndex(where: { $0.id == message.id }) {
+                if messages.contains(where: { $0.id == marked.id }) { messages.remove(at: index) }
+                else { messages[index] = marked }
+            } else if !messages.contains(where: { $0.id == marked.id }) {
+                messages.append(marked)
             }
+            pendingPayloads.removeValue(forKey: message.id)
+            saveHistory()
+            presenceClient.messageCreatePublisher.send(marked)
         } catch {
-            if let index = self.messages.firstIndex(where: { $0.id == message.id }) {
-                self.messages[index].sendStatus = .failed
+            if let index = messages.firstIndex(where: { $0.id == message.id }) {
+                messages[index].sendStatus = .failed
             }
-            self.errorMessage = error.localizedDescription
+            saveHistory()
+            if !DiscordRequestCancellation.isCancellation(error) { errorMessage = error.localizedDescription }
         }
     }
 
@@ -342,148 +367,6 @@ public final class ChatViewModel: ObservableObject {
         }
     }
 
-    public func sendPhotoMessage(imageData: Data, filename: String = "photo.jpg") async {
-        let tempId = "temp_\(UUID().uuidString)"
-        let replyTarget = replyingTo
-        let replyId = replyTarget?.id
-
-        let author = authStore.currentUser ?? DiscordUser(
-            id: "me",
-            username: "Me",
-            discriminator: nil,
-            globalName: "Me",
-            avatar: nil,
-            bot: false,
-            system: false,
-            accentColor: nil,
-            banner: nil
-        )
-
-        let optimisticMessage = DiscordMessage(
-            id: tempId,
-            channelId: channel.id,
-            author: author,
-            content: "📷 Photo",
-            timestamp: DiscordMessage.isoFormatterStandard.string(from: Date()),
-            editedTimestamp: nil,
-            attachments: nil,
-            embeds: nil,
-            messageReference: replyId != nil ? MessageReference(messageId: replyId, channelId: channel.id, guildId: nil) : nil,
-            referencedMessage: replyTarget != nil ? ReferencedMessageWrapper(message: replyTarget) : nil,
-            reactions: nil,
-            pinned: false,
-            isOutgoing: true,
-            sendStatus: .sending
-        )
-
-        self.messages.append(optimisticMessage)
-        self.replyingTo = nil
-        self.isSending = true
-
-        do {
-            let sent = try await apiClient.uploadAttachment(
-                channelId: channel.id,
-                fileData: imageData,
-                filename: filename,
-                mimeType: "image/jpeg",
-                replyToMessageId: replyId
-            )
-            self.isSending = false
-            try apiClient.checkAccount()
-            let marked = markedAsOutgoing(sent)
-
-            if let index = self.messages.firstIndex(where: { $0.id == tempId }) {
-                if self.messages.contains(where: { $0.id == marked.id && $0.id != tempId }) {
-                    self.messages.remove(at: index)
-                } else {
-                    self.messages[index] = marked
-                }
-            } else if !self.messages.contains(where: { $0.id == marked.id }) {
-                self.messages.append(marked)
-            }
-
-            PresenceClient.shared.messageCreatePublisher.send(marked)
-        } catch {
-            self.isSending = false
-            self.errorMessage = error.localizedDescription
-            if let index = self.messages.firstIndex(where: { $0.id == tempId }) {
-                self.messages[index].sendStatus = .failed
-            }
-        }
-    }
-
-    public func sendVoiceMessage(audioData: Data, durationSecs: Float, filename: String = "voice-message.m4a") async {
-        let tempId = "temp_\(UUID().uuidString)"
-        let replyTarget = replyingTo
-        let replyId = replyTarget?.id
-
-        let author = authStore.currentUser ?? DiscordUser(
-            id: "me",
-            username: "Me",
-            discriminator: nil,
-            globalName: "Me",
-            avatar: nil,
-            bot: false,
-            system: false,
-            accentColor: nil,
-            banner: nil
-        )
-
-        let optimisticMessage = DiscordMessage(
-            id: tempId,
-            channelId: channel.id,
-            author: author,
-            content: "🎤 Voice Message (\(Int(durationSecs))s)",
-            timestamp: DiscordMessage.isoFormatterStandard.string(from: Date()),
-            editedTimestamp: nil,
-            attachments: nil,
-            embeds: nil,
-            messageReference: replyId != nil ? MessageReference(messageId: replyId, channelId: channel.id, guildId: nil) : nil,
-            referencedMessage: replyTarget != nil ? ReferencedMessageWrapper(message: replyTarget) : nil,
-            reactions: nil,
-            pinned: false,
-            isOutgoing: true,
-            sendStatus: .sending
-        )
-
-        self.messages.append(optimisticMessage)
-        self.replyingTo = nil
-        self.isSending = true
-
-        do {
-            let sent = try await apiClient.uploadAttachment(
-                channelId: channel.id,
-                fileData: audioData,
-                filename: filename,
-                mimeType: "audio/m4a",
-                replyToMessageId: replyId,
-                isVoiceMessage: true,
-                durationSecs: durationSecs
-            )
-            self.isSending = false
-            try apiClient.checkAccount()
-            let marked = markedAsOutgoing(sent)
-
-            if let index = self.messages.firstIndex(where: { $0.id == tempId }) {
-                if self.messages.contains(where: { $0.id == marked.id && $0.id != tempId }) {
-                    self.messages.remove(at: index)
-                } else {
-                    self.messages[index] = marked
-                }
-            } else if !self.messages.contains(where: { $0.id == marked.id }) {
-                self.messages.append(marked)
-            }
-
-            PresenceClient.shared.messageCreatePublisher.send(marked)
-        } catch {
-            self.isSending = false
-            self.errorMessage = error.localizedDescription
-            if let index = self.messages.firstIndex(where: { $0.id == tempId }) {
-                self.messages[index].sendStatus = .failed
-            }
-        }
-    }
-
     private func appendMessage(_ message: DiscordMessage) {
         // Prevent duplicate entries
         if messages.contains(where: { $0.id == message.id }) {
@@ -492,13 +375,8 @@ public final class ChatViewModel: ObservableObject {
 
         let msg = markedAsOutgoing(message)
 
-        // If an optimistic sending message matches this outgoing message, replace it
-        if msg.isOutgoing, let tempIndex = messages.firstIndex(where: { $0.sendStatus == .sending && $0.content == msg.content }) {
-            messages[tempIndex] = msg
-            return
-        }
-
         messages.append(msg)
+        saveHistory()
 
         #if canImport(WatchKit)
         if !msg.isOutgoing {
@@ -516,7 +394,7 @@ public final class ChatViewModel: ObservableObject {
         typingResetTask?.cancel()
         typingResetTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 6_000_000_000)
-            guard let self else { return }
+            guard let self, !Task.isCancelled else { return }
             self.typingUserNames.removeAll()
         }
     }

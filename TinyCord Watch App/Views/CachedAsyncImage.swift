@@ -21,7 +21,7 @@ public struct CachedAsyncImage<Content: View>: View {
         self.content = content
 
         // Synchronous memory cache lookup so cached images render on frame 1 without flashing
-        if let url, let cached = MediaCacheService.shared.imageFromMemory(for: url) {
+        if let url, let cached = MediaCacheService.shared.offlineImage(for: url) {
             _phase = State(initialValue: .success(Image(uiImage: cached)))
         } else {
             _phase = State(initialValue: .empty)
@@ -32,6 +32,13 @@ public struct CachedAsyncImage<Content: View>: View {
         content(phase)
             .visibleMediaTask(url: url) {
                 await loadImage()
+            }
+            .onChange(of: url) { _, newURL in
+                if let newURL, let image = MediaCacheService.shared.offlineImage(for: newURL) {
+                    phase = .success(Image(uiImage: image))
+                } else {
+                    phase = .empty
+                }
             }
     }
 
@@ -47,7 +54,11 @@ public struct CachedAsyncImage<Content: View>: View {
             return
         }
 
-        phase = .empty
+        if let cached = MediaCacheService.shared.offlineImage(for: url) {
+            phase = .success(Image(uiImage: cached))
+        } else {
+            phase = .empty
+        }
 
         let image = await MediaCacheService.shared.loadImage(from: url)
         guard !Task.isCancelled else { return }

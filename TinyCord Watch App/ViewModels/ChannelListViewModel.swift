@@ -36,9 +36,7 @@ public final class ChannelListViewModel: ObservableObject {
             self.channels[index].hasUnread = receivedNewer
             self.readStateError = nil
         },
-        onFailure: { [weak self] _, error in
-            self?.readStateError = "Couldn't mark as read on Discord. \(error.localizedDescription)"
-        }
+        onFailure: { _, _ in }
     )
 
     private let historyCache: ChatHistoryCache

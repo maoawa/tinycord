@@ -6,6 +6,11 @@
 import SwiftUI
 import PhotosUI
 
+private enum ChatPage: Hashable {
+    case messages
+    case actions
+}
+
 struct ChatView: View {
     @StateObject var viewModel: ChatViewModel
     @StateObject private var mediaLoader = ChatMediaLoader()
@@ -23,6 +28,8 @@ struct ChatView: View {
     @State private var didInitialScroll = false
     @State private var hasNewMessages = false
     @State private var isAtBottom = false
+    @State private var isFarFromBottom = false
+    @State private var selectedPage: ChatPage = .messages
     private let onMessagesDisplayed: (String) -> Void
 
     init(channel: DiscordChannel, onMessagesDisplayed: @escaping (String) -> Void = { _ in }) {
@@ -32,141 +39,21 @@ struct ChatView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    // Load earlier history
-                    if viewModel.hasMoreHistory && !viewModel.messages.isEmpty {
-                        Button {
-                            Task {
-                                await viewModel.loadOlderMessages()
-                            }
-                        } label: {
-                            HStack(spacing: 4) {
-                                if viewModel.isLoadingOlder {
-                                    ProgressView()
-                                        .scaleEffect(0.6)
-                                } else {
-                                    Image(systemName: "arrow.up")
-                                        .font(.system(size: 9))
-                                }
-                                Text("Load earlier")
-                                    .font(.system(size: 10))
-                            }
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
-                        .disabled(viewModel.isLoadingOlder)
-                    }
+            TabView(selection: $selectedPage) {
+                messagePage(proxy: proxy)
+                    .tag(ChatPage.messages)
 
-                    if viewModel.isLoading && viewModel.messages.isEmpty {
-                        ProgressView()
-                            .padding()
-                    }
-
-                    if let error = viewModel.errorMessage {
-                        Text(error)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.red)
-                            .padding()
-                    }
-                    if let error = viewModel.pendingSaveError {
-                        Text(error).font(.system(size: 11)).foregroundStyle(.red)
-                    }
-
-                    // Message list
-                    ForEach(viewModel.messages) { message in
-                        MessageBubbleView(
-                            message: message,
-                            channelRecipients: viewModel.channel.recipients,
-                            onReply: { target, text in
-                                Task {
-                                    viewModel.replyingTo = target
-                                    await viewModel.sendMessage(text: text)
-                                }
-                            },
-                            onReact: { target, emoji in
-                                Task {
-                                    await viewModel.addReaction(to: target, emoji: emoji)
-                                }
-                            },
-                            onRetry: { target in
-                                Task {
-                                    await viewModel.retrySendMessage(target)
-                                }
-                            },
-                            onDiscard: viewModel.discardFailedMessage
-                        )
-                        .id(message.id)
-                    }
-
-                    // Real-time typing indicators
-                    if !viewModel.typingUserNames.isEmpty {
-                        HStack(spacing: 4) {
-                            ProgressView()
-                                .scaleEffect(0.6)
-                                .frame(width: 12, height: 12)
-                            (Text(viewModel.typingUserNames.joined(separator: ", ")).bold()
-                             + Text(viewModel.typingUserNames.count == 1 ? " is typing..." : " are typing..."))
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 2)
-                    }
-
-                    // Bottom anchor for auto-scrolling
-                    Color.clear
-                        .frame(height: 1)
-                        .id("bottom_anchor")
-                        .background {
-                            if !viewModel.messages.isEmpty {
-                                GeometryReader { geometry in
-                                    Color.clear.preference(key: ChatMediaLayoutKey.self,
-                                        value: ChatMediaLayout(bottom: geometry.frame(in: .global)))
-                                }
-                            }
-                        }
-                }
-                .padding(.horizontal, 4)
-                .padding(.bottom, 60)
+                actionPage
+                    .tag(ChatPage.actions)
             }
-            .background {
-                GeometryReader { geometry in
-                    Color.clear.preference(key: ChatMediaLayoutKey.self,
-                        value: ChatMediaLayout(viewport: geometry.frame(in: .global)))
-                }
-            }
-            .overlay(alignment: .bottom) {
-                if hasNewMessages {
-                    Button {
-                        scrollToBottom(proxy: proxy)
-                        hasNewMessages = false
-                    } label: {
-                        Label("New messages", systemImage: "arrow.down")
-                            .font(.system(size: 11, weight: .semibold))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(themeManager.color)
-                    .padding(.bottom, 60)
-                }
-            }
-            .onPreferenceChange(ChatMediaLayoutKey.self) { layout in
-                mediaLoader.update(layout)
-                isAtBottom = layout.isVisible(layout.bottom)
-                if isAtBottom {
-                    hasNewMessages = false
-                    acknowledgeDisplayedMessages()
-                }
-            }
-            .environment(\.chatMediaLoader, mediaLoader)
+            .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
             .navigationBarBackButtonHidden(true)
             .navigationTitle {
                 Text(viewModel.channel.displayName(currentUserId: authStore.currentUser?.id))
                     .foregroundStyle(themeManager.color)
                     .fontWeight(.semibold)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -193,57 +80,32 @@ struct ChatView: View {
                     }
                     .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
                 }
-
-                ToolbarItemGroup(placement: .bottomBar) {
-                    // Quick reply presets
-                    Button {
-                        showQuickReplySheet = true
-                    } label: {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 14))
-                            .foregroundStyle(.white)
-                    }
-                    .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
-
-                    Spacer()
-
-                    HStack(spacing: 6) {
-                        // Gallery button
-                        PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
-                            Image(systemName: "photo")
-                                .font(.system(size: 14))
-                                .foregroundStyle(.white)
-                        }
-                        .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
-
-                        // Voice message button
-                        Button {
-                            showVoiceMessageSheet = true
-                        } label: {
-                            Image(systemName: "waveform")
-                                .font(.system(size: 14))
-                                .foregroundStyle(.white)
-                        }
-                        .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
-                        .disabled(voiceCall.active)
-
-                        // Compose message directly invokes watch keyboard / dictation
-                        TextFieldLink(prompt: Text("Message...")) {
-                            Image(systemName: "square.and.pencil")
-                                .font(.system(size: 14))
-                                .foregroundStyle(.white)
-                        } onSubmit: { text in
-                            Task {
-                                await viewModel.sendMessage(text: text)
+                if selectedPage == .messages {
+                    ToolbarItemGroup(placement: .bottomBar) {
+                        if hasNewMessages || isFarFromBottom {
+                            Button {
+                                scrollToBottom(proxy: proxy)
+                                hasNewMessages = false
+                            } label: {
+                                Image(systemName: "arrow.down")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(.white)
                             }
+                            .tint(hasNewMessages ? themeManager.color : (themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25)))
+                            .accessibilityLabel(hasNewMessages ? "New messages" : "Scroll to bottom")
                         }
-                        .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+                        Spacer()
+                        composeButton
                     }
                 }
             }
             .task {
-                revealInitialMessages(proxy: proxy)
+                // Wait for the first network/cache merge before positioning the
+                // scroll view; doing this before loadMessages can leave the
+                // conversation at the top.
                 await viewModel.loadMessages()
+                await Task.yield()
+                revealInitialMessages(proxy: proxy)
                 acknowledgeDisplayedMessages()
             }
             .onAppear {
@@ -310,14 +172,234 @@ struct ChatView: View {
         .modifier(MessageLinkBrowserModifier())
     }
 
+    private func messagePage(proxy: ScrollViewProxy) -> some View {
+        ScrollView {
+            LazyVStack(spacing: 8) {
+                // Load earlier history
+                if viewModel.hasMoreHistory && !viewModel.messages.isEmpty {
+                    Button {
+                        Task {
+                            await viewModel.loadOlderMessages()
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if viewModel.isLoadingOlder {
+                                ProgressView()
+                                    .scaleEffect(0.6)
+                            } else {
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            Text("Load earlier")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, minHeight: 34)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isLoadingOlder)
+                }
+
+                if viewModel.isLoading && viewModel.messages.isEmpty {
+                    ProgressView()
+                        .padding()
+                }
+
+                if let error = viewModel.errorMessage {
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .padding()
+                }
+                if let error = viewModel.pendingSaveError {
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                }
+
+                ForEach(viewModel.messages) { message in
+                    MessageBubbleView(
+                        message: message,
+                        channelRecipients: viewModel.channel.recipients,
+                        onReply: { target, text in
+                            Task {
+                                viewModel.replyingTo = target
+                                await viewModel.sendMessage(text: text)
+                            }
+                        },
+                        onReact: { target, emoji in
+                            Task {
+                                await viewModel.addReaction(to: target, emoji: emoji)
+                            }
+                        },
+                        onRetry: { target in
+                            Task {
+                                await viewModel.retrySendMessage(target)
+                            }
+                        },
+                        onDiscard: viewModel.discardFailedMessage,
+                        canRemove: viewModel.canRemoveMessage,
+                        onRemove: { target in
+                            Task { await viewModel.removeMessage(target) }
+                        }
+                    )
+                    .id(message.id)
+                }
+
+                if !viewModel.typingUserNames.isEmpty {
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 12, height: 12)
+                        HStack(spacing: 0) {
+                            if viewModel.typingUserNames.count == 2 {
+                                Text(viewModel.typingUserNames[0]).bold()
+                                Text(" and ")
+                                Text(viewModel.typingUserNames[1]).bold()
+                            } else {
+                                ForEach(Array(viewModel.typingUserNames.enumerated()), id: \.offset) { index, name in
+                                    Text(name).bold()
+                                    if index < viewModel.typingUserNames.count - 1 {
+                                        Text(index == viewModel.typingUserNames.count - 2 ? ", and " : ", ")
+                                    }
+                                }
+                            }
+                            Text(viewModel.typingUserNames.count == 1 ? " is typing..." : " are typing...")
+                        }
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
+                }
+
+                Color.clear
+                    .frame(height: 1)
+                    .id("bottom_anchor")
+                    .background {
+                        if !viewModel.messages.isEmpty {
+                            GeometryReader { geometry in
+                                Color.clear.preference(key: ChatMediaLayoutKey.self,
+                                    value: ChatMediaLayout(bottom: geometry.frame(in: .global)))
+                            }
+                        }
+                    }
+            }
+            .padding(.horizontal, 4)
+            // Keep the last message above the fixed bottom controls.
+            .padding(.bottom, 60)
+        }
+        .background {
+            GeometryReader { geometry in
+                Color.clear.preference(key: ChatMediaLayoutKey.self,
+                    value: ChatMediaLayout(viewport: geometry.frame(in: .global)))
+            }
+        }
+        .onPreferenceChange(ChatMediaLayoutKey.self) { layout in
+            mediaLoader.update(layout)
+            isAtBottom = layout.isVisible(layout.bottom)
+            let distanceBelowViewport = max(0, layout.bottom.minY - layout.viewport.maxY)
+            isFarFromBottom = layout.viewport.height > 0 && distanceBelowViewport > layout.viewport.height * 2
+            if isAtBottom {
+                hasNewMessages = false
+                acknowledgeDisplayedMessages()
+            }
+        }
+        .environment(\.chatMediaLoader, mediaLoader)
+    }
+
+    private var actionPage: some View {
+        VStack(spacing: 10) {
+            actionButton(systemName: "bolt.fill", title: "Quick reply") {
+                showQuickReplySheet = true
+            }
+
+            PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                actionButtonLabel(systemName: "photo", title: "Photo")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Send photo")
+
+            Button {
+                showVoiceMessageSheet = true
+            } label: {
+                actionButtonLabel(systemName: "waveform", title: "Voice message")
+            }
+            .buttonStyle(.plain)
+            .disabled(voiceCall.active)
+            .opacity(voiceCall.active ? 0.45 : 1)
+            .accessibilityLabel("Send voice message")
+
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .padding(.horizontal, 18)
+        .padding(.bottom, 8)
+    }
+
+    private func actionButton(systemName: String, title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            actionButtonLabel(systemName: systemName, title: title)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+    }
+
+    private func actionButtonLabel(systemName: String, title: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemName)
+                .font(.system(size: 16, weight: .semibold))
+                .frame(width: 32, height: 32)
+                .background(themeManager.actionButtonColor)
+                .clipShape(Circle())
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.55)
+                .layoutPriority(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.white.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var composeButton: some View {
+        TextFieldLink(prompt: Text("Message...")) {
+            Image(systemName: "square.and.pencil")
+                .font(.system(size: 14))
+                .foregroundStyle(.white)
+        } onSubmit: { text in
+            Task { await viewModel.sendMessage(text: text) }
+        }
+        .tint(themeManager.themeActionButtons ? themeManager.color : Color(white: 0.25))
+        .accessibilityLabel("Compose message")
+    }
+
     private func revealInitialMessages(proxy: ScrollViewProxy) {
-        guard !didInitialScroll, !viewModel.messages.isEmpty else { return }
+        guard !viewModel.messages.isEmpty else { return }
         didInitialScroll = true
-        proxy.scrollTo("bottom_anchor", anchor: .bottom)
+        // The anchor is created by LazyVStack during the next layout pass.
+        // Dispatching the scroll avoids racing that first layout.
+        DispatchQueue.main.async {
+            if let lastID = self.viewModel.messages.last?.id {
+                proxy.scrollTo(lastID, anchor: .bottom)
+            }
+            proxy.scrollTo("bottom_anchor", anchor: .bottom)
+        }
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy) {
         withAnimation(.easeOut(duration: 0.2)) {
+            if let lastID = viewModel.messages.last?.id {
+                proxy.scrollTo(lastID, anchor: .bottom)
+            }
             proxy.scrollTo("bottom_anchor", anchor: .bottom)
         }
     }

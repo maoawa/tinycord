@@ -73,6 +73,7 @@ public struct DiscordCall: Codable, Hashable, Sendable {
 
 public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
     public let id: String
+    public let nonce: String?
     public let channelId: String
     public let author: DiscordUser
     public let content: String
@@ -95,6 +96,7 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
 
     public init(
         id: String,
+        nonce: String? = nil,
         channelId: String,
         author: DiscordUser,
         content: String,
@@ -115,6 +117,7 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
         sendStatus: SendStatus = .sent
     ) {
         self.id = id
+        self.nonce = nonce
         self.channelId = channelId
         self.author = author
         self.content = content
@@ -137,6 +140,7 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id
+        case nonce
         case channelId = "channel_id"
         case author
         case content
@@ -151,6 +155,43 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
         case stickerItems = "sticker_items"
         case mentions
         case type, flags, call
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+
+        // Discord accepts both string and integer nonces. A numeric nonce in
+        // a successful POST response must not turn into a client-side send
+        // failure just because the message cache models it as text.
+        if let value = try? container.decode(String.self, forKey: .nonce) {
+            nonce = value
+        } else if let value = try? container.decode(UInt64.self, forKey: .nonce) {
+            nonce = String(value)
+        } else if let value = try? container.decode(Int64.self, forKey: .nonce) {
+            nonce = String(value)
+        } else {
+            nonce = nil
+        }
+
+        channelId = try container.decode(String.self, forKey: .channelId)
+        author = try container.decode(DiscordUser.self, forKey: .author)
+        content = try container.decode(String.self, forKey: .content)
+        timestamp = try container.decode(String.self, forKey: .timestamp)
+        editedTimestamp = try container.decodeIfPresent(String.self, forKey: .editedTimestamp)
+        attachments = try container.decodeIfPresent([DiscordAttachment].self, forKey: .attachments)
+        embeds = try container.decodeIfPresent([DiscordEmbed].self, forKey: .embeds)
+        messageReference = try container.decodeIfPresent(MessageReference.self, forKey: .messageReference)
+        referencedMessage = try container.decodeIfPresent(ReferencedMessageWrapper.self, forKey: .referencedMessage)
+        reactions = try container.decodeIfPresent([DiscordReaction].self, forKey: .reactions)
+        pinned = try container.decodeIfPresent(Bool.self, forKey: .pinned)
+        stickerItems = try container.decodeIfPresent([DiscordStickerItem].self, forKey: .stickerItems)
+        mentions = try container.decodeIfPresent([DiscordUser].self, forKey: .mentions)
+        type = try container.decodeIfPresent(Int.self, forKey: .type)
+        flags = try container.decodeIfPresent(Int.self, forKey: .flags)
+        call = try container.decodeIfPresent(DiscordCall.self, forKey: .call)
+        isOutgoing = false
+        sendStatus = .sent
     }
 
     public var isCall: Bool { type == 3 }
@@ -211,6 +252,18 @@ public struct DiscordMessage: Identifiable, Codable, Hashable, Sendable {
             return d
         }
         return Date()
+    }
+
+    /// TinyCord offers an unsend action only for recent, ordinary messages.
+    /// This is a client-side safety window, not Discord's bulk-delete age limit.
+    public func canBeRemoved(by currentUserID: String?, at now: Date = Date()) -> Bool {
+        guard let currentUserID, author.id == currentUserID,
+              sendStatus == .sent, let id = UInt64(id), id > 0,
+              type == nil || type == 0 || type == 19,
+              let sentAt = Self.isoFormatterWithFractional.date(from: timestamp)
+                ?? Self.isoFormatterStandard.date(from: timestamp) else { return false }
+        let age = now.timeIntervalSince(sentAt)
+        return age >= 0 && age <= 15 * 60
     }
 
     public var formattedTime: String {

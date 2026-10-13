@@ -244,7 +244,8 @@ public final class DiscordAPIClient: @unchecked Sendable {
     public func sendMessage(
         channelId: String,
         content: String,
-        replyToMessageId: String? = nil
+        replyToMessageId: String? = nil,
+        nonce: String? = nil
     ) async throws -> DiscordMessage {
         var payload: [String: Any] = [
             "content": content
@@ -255,6 +256,7 @@ public final class DiscordAPIClient: @unchecked Sendable {
                 "message_id": replyToMessageId
             ]
         }
+        if let nonce { payload["nonce"] = nonce }
 
         let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
         let request = try makeRequest(
@@ -265,6 +267,36 @@ public final class DiscordAPIClient: @unchecked Sendable {
 
         let sentMessage: DiscordMessage = try await execute(request)
         return sentMessage
+    }
+
+    /// DELETE returns an empty 204; unlike message reads there is no JSON to decode.
+    public func deleteMessage(channelId: String, messageId: String) async throws {
+        let request = try makeRequest(path: "/channels/\(channelId)/messages/\(messageId)", method: "DELETE")
+        try checkAccount()
+        let requestSessionID = authStore.sessionID
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            if Task.isCancelled || DiscordRequestCancellation.isCancellation(error) { throw CancellationError() }
+            throw DiscordAPIError.networkError(error.localizedDescription)
+        }
+        try checkAccount()
+        guard requestSessionID == authStore.sessionID else { throw CancellationError() }
+        guard let http = response as? HTTPURLResponse else {
+            throw DiscordAPIError.serverError(statusCode: -1, message: "Non-HTTP response")
+        }
+        switch http.statusCode {
+        case 200...299: return
+        case 401: throw DiscordAPIError.unauthorized
+        case 403: throw DiscordAPIError.forbidden
+        case 429:
+            throw DiscordAPIError.rateLimited(retryAfter: http.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init))
+        default:
+            throw DiscordAPIError.serverError(statusCode: http.statusCode,
+                                                message: String(data: data, encoding: .utf8) ?? "Unknown error")
+        }
     }
 
     public func triggerTyping(channelId: String) async {
@@ -296,7 +328,8 @@ public final class DiscordAPIClient: @unchecked Sendable {
         content: String = "",
         replyToMessageId: String? = nil,
         isVoiceMessage: Bool = false,
-        durationSecs: Float? = nil
+        durationSecs: Float? = nil,
+        nonce: String? = nil
     ) async throws -> DiscordMessage {
         try checkAccount()
         let uploadSessionID = authStore.sessionID
@@ -324,6 +357,7 @@ public final class DiscordAPIClient: @unchecked Sendable {
         var payload: [String: Any] = [
             "content": content
         ]
+        if let nonce { payload["nonce"] = nonce }
 
         var attachmentDict: [String: Any] = [
             "id": 0,
@@ -386,7 +420,8 @@ public final class DiscordAPIClient: @unchecked Sendable {
                     mimeType: mimeType,
                     content: content,
                     replyToMessageId: replyToMessageId,
-                    isVoiceMessage: false
+                    isVoiceMessage: false,
+                    nonce: nonce
                 )
             }
             throw error

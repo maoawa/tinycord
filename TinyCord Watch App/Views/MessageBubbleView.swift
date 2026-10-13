@@ -11,61 +11,73 @@ struct MessageActionsSheet: View {
     let onReact: (DiscordMessage, String) -> Void
     var onRetry: ((DiscordMessage) -> Void)? = nil
     var onDiscard: ((DiscordMessage) -> Void)? = nil
+    var canRemove = false
+    var onRemove: ((DiscordMessage) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var themeManager = ThemeManager.shared
     @State private var showAllReactions = false
+    @State private var showRemoveConfirmation = false
 
     private let presetEmojis = ["👍", "❤️", "😂", "🎉", "🔥", "👀", "🥺", "🚀"]
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 8) {
-                // Retry if message failed to send
+            VStack(spacing: 7) {
                 if message.sendStatus == .failed {
                     Button {
                         dismiss()
                         onRetry?(message)
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.clockwise")
-                                .foregroundStyle(.red)
-                            Text("Retry Send")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.red)
-                            Spacer()
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 4)
+                        actionRowLabel(systemName: "arrow.clockwise", title: "Retry Send", color: .red)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.plain)
 
                     if let onDiscard {
-                        Button("Discard", role: .destructive) {
+                        Button {
                             dismiss()
                             onDiscard(message)
+                        } label: {
+                            actionRowLabel(systemName: "trash", title: "Discard", color: .red)
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.plain)
                     }
                 }
 
-                // Reply Button directly invokes keyboard and sends
+                if canRemove, let onRemove {
+                    Button {
+                        showRemoveConfirmation = true
+                    } label: {
+                        actionRowLabel(systemName: "trash", title: "Remove Message", color: .red)
+                    }
+                    .buttonStyle(.plain)
+                    .confirmationDialog("Remove this message for everyone?", isPresented: $showRemoveConfirmation) {
+                        Button("Remove Message", role: .destructive) {
+                            dismiss()
+                            onRemove(message)
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("This cannot be undone.")
+                    }
+                }
+
                 TextFieldLink(prompt: Text("Reply...")) {
-                    HStack {
+                    HStack(spacing: 7) {
                         Image(systemName: "arrowshape.turn.up.left.fill")
-                            .font(.system(size: 13))
+                            .font(.system(size: 14, weight: .semibold))
                         Text("Reply")
                             .font(.system(size: 14, weight: .semibold))
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 5)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, minHeight: 46)
+                    .background(themeManager.color)
+                    .clipShape(Capsule())
                 } onSubmit: { text in
                     dismiss()
                     onReply(message, text)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(themeManager.color)
+                .buttonStyle(.plain)
 
-                // Emojis only - 4 columns, clean tap targets without text
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), spacing: 6) {
                     ForEach(presetEmojis, id: \.self) { emoji in
                         Button {
@@ -83,27 +95,29 @@ struct MessageActionsSheet: View {
                     }
                 }
 
-                // More reactions button
                 Button {
                     showAllReactions = true
                 } label: {
-                    HStack {
+                    HStack(spacing: 6) {
                         Image(systemName: "face.smiling")
                             .foregroundStyle(.yellow)
                         Text("More Reactions...")
                             .font(.system(size: 12, weight: .medium))
                         Spacer()
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 10))
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, minHeight: 38)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(Capsule())
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
         }
         .navigationTitle {
             Text("Actions")
@@ -128,6 +142,23 @@ struct MessageActionsSheet: View {
             }
         }
     }
+
+    private func actionRowLabel(systemName: String, title: String, color: Color) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemName)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(color)
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(color)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, minHeight: 42)
+        .background(Color.white.opacity(0.08))
+        .clipShape(Capsule())
+    }
+
 }
 
 struct MessageBubbleView: View {
@@ -137,6 +168,8 @@ struct MessageBubbleView: View {
     let onReact: (DiscordMessage, String) -> Void
     var onRetry: ((DiscordMessage) -> Void)? = nil
     var onDiscard: ((DiscordMessage) -> Void)? = nil
+    var canRemove: ((DiscordMessage) -> Bool)? = nil
+    var onRemove: ((DiscordMessage) -> Void)? = nil
 
     @EnvironmentObject var authStore: AuthStore
     @ObservedObject var endpointConfig = EndpointConfig.shared
@@ -422,6 +455,7 @@ struct MessageBubbleView: View {
                                 .background(reaction.me ? themeManager.color.opacity(0.4) : Color.gray.opacity(0.25))
                                 .clipShape(Capsule())
                             }
+                            Spacer(minLength: 0)
                         }
                         .padding(.top, 2)
                     }
@@ -454,7 +488,9 @@ struct MessageBubbleView: View {
                 onReply: onReply,
                 onReact: onReact,
                 onRetry: onRetry,
-                onDiscard: onDiscard
+                onDiscard: onDiscard,
+                canRemove: canRemove?(message) ?? false,
+                onRemove: onRemove
             )
         }
     }

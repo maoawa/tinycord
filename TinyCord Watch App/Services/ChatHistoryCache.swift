@@ -5,13 +5,44 @@ enum OutgoingMessagePayload: Codable, Sendable {
     case text(String)
     case attachment(data: Data, filename: String, mimeType: String, isVoiceMessage: Bool, durationSecs: Float?)
 
-    func send(using api: DiscordAPIClient, channelID: String, replyID: String?) async throws -> DiscordMessage {
+    /// Stable for the lifetime of a submission. This is used to coalesce a
+    /// duplicate UI callback while the first request is still in flight.
+    var submissionKey: String {
         switch self {
         case .text(let text):
-            return try await api.sendMessage(channelId: channelID, content: text, replyToMessageId: replyID)
+            return "text:\(text)"
+        case let .attachment(data, filename, mimeType, isVoiceMessage, durationSecs):
+            let head = data.prefix(16).map { String(format: "%02x", $0) }.joined()
+            let tail = data.suffix(16).map { String(format: "%02x", $0) }.joined()
+            return "attachment:\(filename):\(mimeType):\(data.count):\(head):\(tail):\(isVoiceMessage):\(durationSecs ?? -1)"
+        }
+    }
+
+    func matches(_ remote: DiscordMessage, optimistic: DiscordMessage, currentUserID: String?) -> Bool {
+        guard remote.author.id == currentUserID,
+              abs(remote.parsedDate.timeIntervalSince(optimistic.parsedDate)) <= 180 else { return false }
+        if let nonce = optimistic.nonce, let remoteNonce = remote.nonce, nonce == remoteNonce {
+            return true
+        }
+        guard remote.messageReference?.messageId == optimistic.messageReference?.messageId else { return false }
+        switch self {
+        case .text(let text):
+            return remote.content == text
+        case let .attachment(_, filename, _, isVoiceMessage, _):
+            guard let attachment = remote.attachments?.first(where: { $0.filename == filename }) else { return false }
+            // Discord may strip the voice flag on a successful fallback upload;
+            // filename and proximity still identify the original request.
+            return !isVoiceMessage || remote.isVoiceMessage || attachment.isAudio
+        }
+    }
+
+    func send(using api: DiscordAPIClient, channelID: String, replyID: String?, nonce: String?) async throws -> DiscordMessage {
+        switch self {
+        case .text(let text):
+            return try await api.sendMessage(channelId: channelID, content: text, replyToMessageId: replyID, nonce: nonce)
         case let .attachment(data, filename, mimeType, voice, duration):
             return try await api.uploadAttachment(channelId: channelID, fileData: data, filename: filename,
-                mimeType: mimeType, replyToMessageId: replyID, isVoiceMessage: voice, durationSecs: duration)
+                mimeType: mimeType, replyToMessageId: replyID, isVoiceMessage: voice, durationSecs: duration, nonce: nonce)
         }
     }
 }

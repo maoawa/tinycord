@@ -46,6 +46,9 @@ public final class ChatViewModel: ObservableObject {
     private var typingResetTask: Task<Void, Never>?
     private var needsHistoryRefresh = false
     private var deletedDuringRefresh = Set<String>()
+    private var removingMessageIDs = Set<String>()
+    private var activeSubmissionKeys = Set<String>()
+    private var recentSubmissionTimes: [String: Date] = [:]
 
     public init(
         channel: DiscordChannel,
@@ -291,11 +294,27 @@ public final class ChatViewModel: ObservableObject {
 
     private func enqueue(_ payload: OutgoingMessagePayload, preview: String) async {
         guard (try? apiClient.checkAccount()) != nil else { return }
-        let tempID = "temp_\(UUID().uuidString)"
         let target = replyingTo
+        // Key only on the payload: the first callback clears `replyingTo`
+        // before a duplicate watchOS callback can arrive, so including the
+        // reply ID would let the same text escape the coalescer.
+        let submissionKey = payload.submissionKey
+        let now = Date()
+        if activeSubmissionKeys.contains(submissionKey) ||
+            (recentSubmissionTimes[submissionKey].map { now.timeIntervalSince($0) < 0.85 } == true) {
+            // TextFieldLink can deliver the same submit callback twice on watchOS.
+            // Coalesce it before creating a second optimistic row or POST.
+            return
+        }
+        activeSubmissionKeys.insert(submissionKey)
+        recentSubmissionTimes[submissionKey] = now
+        let tempID = "temp_\(UUID().uuidString)"
+        // Discord limits message nonces to 25 characters. A UUID string is
+        // 36 characters and makes every create-message request fail.
+        let nonce = String(UInt64.random(in: 1...UInt64.max))
         let author = authStore.currentUser ?? DiscordUser(id: "me", username: "Me", discriminator: nil,
             globalName: "Me", avatar: nil, bot: false, system: false, accentColor: nil, banner: nil)
-        let message = DiscordMessage(id: tempID, channelId: channel.id, author: author, content: preview,
+        let message = DiscordMessage(id: tempID, nonce: nonce, channelId: channel.id, author: author, content: preview,
             timestamp: DiscordMessage.isoFormatterStandard.string(from: Date()),
             messageReference: target.map { MessageReference(messageId: $0.id, channelId: channel.id, guildId: nil) },
             referencedMessage: target.map { ReferencedMessageWrapper(message: $0) },
@@ -305,7 +324,7 @@ public final class ChatViewModel: ObservableObject {
         localSendID = tempID
         replyingTo = nil
         saveHistory()
-        await transmit(message, payload: payload)
+        await transmit(message, payload: payload, submissionKey: submissionKey)
     }
 
     public func retrySendMessage(_ message: DiscordMessage) async {
@@ -315,7 +334,11 @@ public final class ChatViewModel: ObservableObject {
             errorMessage = "The original message is unavailable. Please compose it again."
             return
         }
-        await transmit(current, payload: payload)
+        let submissionKey = payload.submissionKey
+        guard !activeSubmissionKeys.contains(submissionKey) else { return }
+        activeSubmissionKeys.insert(submissionKey)
+        recentSubmissionTimes[submissionKey] = Date()
+        await transmit(current, payload: payload, submissionKey: submissionKey)
     }
 
     public func discardFailedMessage(_ message: DiscordMessage) {
@@ -325,16 +348,23 @@ public final class ChatViewModel: ObservableObject {
         saveHistory()
     }
 
-    private func transmit(_ message: DiscordMessage, payload: OutgoingMessagePayload) async {
+    private func transmit(_ message: DiscordMessage, payload: OutgoingMessagePayload, submissionKey: String) async {
         guard let index = messages.firstIndex(where: { $0.id == message.id }),
-              (try? apiClient.checkAccount()) != nil else { return }
+              (try? apiClient.checkAccount()) != nil else {
+            activeSubmissionKeys.remove(submissionKey)
+            recentSubmissionTimes.removeValue(forKey: submissionKey)
+            return
+        }
         messages[index].sendStatus = .sending
         isSending = true
         errorMessage = nil
-        defer { isSending = messages.contains { $0.sendStatus == .sending } }
+        defer {
+            activeSubmissionKeys.remove(submissionKey)
+            isSending = messages.contains { $0.sendStatus == .sending }
+        }
         do {
             let sent = try await payload.send(using: apiClient, channelID: channel.id,
-                                              replyID: message.messageReference?.messageId)
+                                              replyID: message.messageReference?.messageId, nonce: message.nonce)
             try apiClient.checkAccount()
             let marked = markedAsOutgoing(sent)
             if let index = messages.firstIndex(where: { $0.id == message.id }) {
@@ -346,17 +376,83 @@ public final class ChatViewModel: ObservableObject {
             pendingPayloads.removeValue(forKey: message.id)
             saveHistory()
             presenceClient.messageCreatePublisher.send(marked)
+            retainRecentSubmissionKey(submissionKey)
         } catch {
+            // A timeout or decode failure can happen after Discord accepted the
+            // request. Reconcile before showing Retry; otherwise Retry creates a
+            // second message while the first one is already on Discord.
+            if let delivered = await findDeliveredMessage(for: message, payload: payload) {
+                applyDelivered(delivered, replacing: message)
+                retainRecentSubmissionKey(submissionKey)
+                return
+            }
             if let index = messages.firstIndex(where: { $0.id == message.id }) {
                 messages[index].sendStatus = .failed
             }
+            recentSubmissionTimes.removeValue(forKey: submissionKey)
             saveHistory()
             if !DiscordRequestCancellation.isCancellation(error) { errorMessage = error.localizedDescription }
         }
     }
 
+    private func retainRecentSubmissionKey(_ key: String) {
+        recentSubmissionTimes[key] = Date()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard let self else { return }
+            self.recentSubmissionTimes.removeValue(forKey: key)
+        }
+    }
+
+    private func findDeliveredMessage(for optimistic: DiscordMessage, payload: OutgoingMessagePayload) async -> DiscordMessage? {
+        guard (try? apiClient.checkAccount()) != nil,
+              let recent = try? await apiClient.getMessages(channelId: channel.id, limit: 20) else { return nil }
+        return recent
+            .filter { payload.matches($0, optimistic: optimistic, currentUserID: authStore.currentUser?.id) }
+            .min { abs($0.parsedDate.timeIntervalSince(optimistic.parsedDate)) < abs($1.parsedDate.timeIntervalSince(optimistic.parsedDate)) }
+    }
+
+    private func applyDelivered(_ delivered: DiscordMessage, replacing optimistic: DiscordMessage) {
+        let marked = markedAsOutgoing(delivered)
+        if let index = messages.firstIndex(where: { $0.id == optimistic.id }) {
+            if let existing = messages.firstIndex(where: { $0.id == marked.id }), existing != index {
+                messages.remove(at: index)
+            } else {
+                messages[index] = marked
+            }
+        } else if !messages.contains(where: { $0.id == marked.id }) {
+            messages.append(marked)
+        }
+        pendingPayloads.removeValue(forKey: optimistic.id)
+        saveHistory()
+        presenceClient.messageCreatePublisher.send(marked)
+    }
+
     public func sendQuickReply(_ text: String) async {
         await sendMessage(text: text)
+    }
+
+    public func canRemoveMessage(_ message: DiscordMessage) -> Bool {
+        message.channelId == channel.id && message.canBeRemoved(by: authStore.currentUser?.id)
+            && !removingMessageIDs.contains(message.id)
+    }
+
+    public func removeMessage(_ message: DiscordMessage) async {
+        guard canRemoveMessage(message), messages.contains(where: { $0.id == message.id }),
+              (try? apiClient.checkAccount()) != nil else { return }
+        removingMessageIDs.insert(message.id)
+        defer { removingMessageIDs.remove(message.id) }
+        do {
+            try await apiClient.deleteMessage(channelId: channel.id, messageId: message.id)
+            // A refresh started before the DELETE may still return this message.
+            if isLoading { deletedDuringRefresh.insert(message.id) }
+            messages.removeAll { $0.id == message.id }
+            saveHistory()
+            presenceClient.messageDeletePublisher.send(GatewayMessageDeleteData(id: message.id, channelId: channel.id))
+        } catch {
+            guard !DiscordRequestCancellation.isCancellation(error) else { return }
+            errorMessage = "Couldn't remove message. " + error.localizedDescription
+        }
     }
 
     public func addReaction(to message: DiscordMessage, emoji: String) async {
@@ -374,6 +470,18 @@ public final class ChatViewModel: ObservableObject {
         }
 
         let msg = markedAsOutgoing(message)
+
+        if msg.isOutgoing,
+           let matchingIndex = messages.firstIndex(where: { local in
+               guard local.sendStatus != .sent, let payload = pendingPayloads[local.id] else { return false }
+               return payload.matches(msg, optimistic: local, currentUserID: authStore.currentUser?.id)
+           }) {
+            let localID = messages[matchingIndex].id
+            pendingPayloads.removeValue(forKey: localID)
+            messages[matchingIndex] = msg
+            saveHistory()
+            return
+        }
 
         messages.append(msg)
         saveHistory()

@@ -55,8 +55,8 @@ final class ChatURLProtocol: URLProtocol, @unchecked Sendable {
 }
 
 @main struct ChatReliabilityChecks {
-    static func message(_ id: String, content: String = "hello") -> DiscordMessage {
-        DiscordMessage(id: id, channelId: "channel", author: user, content: content, timestamp: "2026-10-09T00:00:00Z")
+    static func message(_ id: String, content: String = "hello", timestamp: String = "2026-10-09T00:00:00Z") -> DiscordMessage {
+        DiscordMessage(id: id, channelId: "channel", author: user, content: content, timestamp: timestamp)
     }
     static let user = try! JSONDecoder().decode(DiscordUser.self, from: Data(#"{"id":"101","username":"Sat"}"#.utf8))
     @MainActor static func waitForRequest(_ count: Int) async {
@@ -132,6 +132,8 @@ final class ChatURLProtocol: URLProtocol, @unchecked Sendable {
         let firstSend = Task { await vm!.sendVoiceMessage(audioData: audio, durationSecs: 4.25, filename: "recording.m4a") }
         await waitForRequest(1)
         ChatURLProtocol.at(0).respond(500, Data("temporary failure".utf8))
+        await waitForRequest(2)
+        ChatURLProtocol.at(1).respond(200, Data("[]".utf8))
         await firstSend.value
         let failedID = vm!.messages.last!.id
         precondition(vm!.messages.last!.sendStatus == .failed)
@@ -144,16 +146,18 @@ final class ChatURLProtocol: URLProtocol, @unchecked Sendable {
         let failed = retryVM.messages.last!
         precondition(failed.id == failedID && failed.sendStatus == .failed)
         let retry = Task { await retryVM.retrySendMessage(failed) }
-        await waitForRequest(2)
-        let upload = ChatURLProtocol.at(1)
+        await waitForRequest(3)
+        let upload = ChatURLProtocol.at(2)
         let body = upload.body
         let text = String(decoding: body, as: UTF8.self)
         precondition(upload.request.value(forHTTPHeaderField: "Content-Type")!.hasPrefix("multipart/form-data"))
         precondition(body.range(of: audio) != nil && text.contains("recording.m4a") && text.contains("audio/m4a"))
         precondition(text.contains("8192") && text.contains("4.25") && text.contains("249"))
+        precondition(text.contains(failed.nonce ?? ""), "Retries must reuse the original client nonce")
+        precondition((failed.nonce?.count ?? 26) <= 25, "Discord message nonces must be at most 25 characters")
         precondition(!text.contains("Voice Message"), "Never post the optimistic voice label as text")
         await retryVM.retrySendMessage(failed)
-        precondition(ChatURLProtocol.count == 2, "A second tap while uploading cannot resend")
+        precondition(ChatURLProtocol.count == 3, "A second tap while uploading cannot resend")
         upload.respond(200, try JSONEncoder().encode(message("252", content: "")))
         await retry.value
         precondition(!retryVM.messages.contains { $0.id == failedID })
@@ -161,61 +165,149 @@ final class ChatURLProtocol: URLProtocol, @unchecked Sendable {
         print("PASS: failed voice retry after reopen uses original bytes, filename, duration, flags and reply; double taps suppressed; success clears outbox")
 
         let offlineRead = Task { await retryVM.loadMessages() }
-        await waitForRequest(3)
-        ChatURLProtocol.at(2).respond(503, Data("offline".utf8))
+        await waitForRequest(4)
+        ChatURLProtocol.at(3).respond(503, Data("offline".utf8))
         await offlineRead.value
         precondition(!retryVM.messages.isEmpty && retryVM.errorMessage!.contains("Showing saved messages"))
         retryVM.stopPolling()
         let photo = Data([42, 12, 254])
         let photoSend = Task { await retryVM.sendPhotoMessage(imageData: photo, filename: "my-photo.jpg") }
-        await waitForRequest(4)
-        ChatURLProtocol.at(3).respond(500, Data())
+        await waitForRequest(5)
+        ChatURLProtocol.at(4).respond(500, Data())
+        await waitForRequest(6)
+        ChatURLProtocol.at(5).respond(200, Data("[]".utf8))
         await photoSend.value
         let failedPhoto = retryVM.messages.last!
         let refresh = Task { await retryVM.loadMessages() }
-        await waitForRequest(5)
-        ChatURLProtocol.at(4).respond(200, try JSONEncoder().encode([message("252")]))
+        await waitForRequest(7)
+        ChatURLProtocol.at(6).respond(200, try JSONEncoder().encode([message("252")]))
         await refresh.value
         precondition(retryVM.messages.contains { $0.id == failedPhoto.id && $0.sendStatus == .failed })
         let photoRetry = Task { await retryVM.retrySendMessage(failedPhoto) }
-        await waitForRequest(6)
-        let photoBody = ChatURLProtocol.at(5).body
+        await waitForRequest(8)
+        let photoBody = ChatURLProtocol.at(7).body
         precondition(photoBody.range(of: photo) != nil && String(decoding: photoBody, as: UTF8.self).contains("my-photo.jpg"))
-        ChatURLProtocol.at(5).respond(200, try JSONEncoder().encode(message("253")))
+        ChatURLProtocol.at(7).respond(200, try JSONEncoder().encode(message("253")))
         await photoRetry.value
         retryVM.stopPolling()
         let beforeIncoming = retryVM.localSendID
         let raceRefresh = Task { await retryVM.loadMessages() }
-        await waitForRequest(7)
+        await waitForRequest(9)
         presence.messageCreatePublisher.send(message("254"))
         presence.messageDeletePublisher.send(GatewayMessageDeleteData(id: "252", channelId: "channel"))
         try? await Task.sleep(nanoseconds: 20_000_000)
-        ChatURLProtocol.at(6).respond(200, try JSONEncoder().encode([message("253"), message("252")]))
+        ChatURLProtocol.at(8).respond(200, try JSONEncoder().encode([message("253"), message("252")]))
         await raceRefresh.value
         precondition(retryVM.messages.contains { $0.id == "254" })
         precondition(!retryVM.messages.contains { $0.id == "252" })
         precondition(retryVM.localSendID == beforeIncoming, "Incoming messages must not request a local-send scroll")
         retryVM.stopPolling()
         let textSend = Task { await retryVM.sendMessage(text: "ordinary text") }
-        await waitForRequest(8)
-        ChatURLProtocol.at(7).respond(500, Data())
+        await waitForRequest(10)
+        ChatURLProtocol.at(9).respond(500, Data())
+        await waitForRequest(11)
+        ChatURLProtocol.at(10).respond(200, Data("[]".utf8))
         await textSend.value
         let failedText = retryVM.messages.last!
         let textRetry = Task { await retryVM.retrySendMessage(failedText) }
-        await waitForRequest(9)
-        let textJSON = try JSONSerialization.jsonObject(with: ChatURLProtocol.at(8).body) as! [String: Any]
+        await waitForRequest(12)
+        let textJSON = try JSONSerialization.jsonObject(with: ChatURLProtocol.at(11).body) as! [String: Any]
         precondition(textJSON["content"] as? String == "ordinary text")
-        ChatURLProtocol.at(8).respond(500, Data())
+        ChatURLProtocol.at(11).respond(500, Data())
+        await waitForRequest(13)
+        ChatURLProtocol.at(12).respond(200, Data("[]".utf8))
         await textRetry.value
         retryVM.discardFailedMessage(failedText)
         precondition(cache.load(channelID: channel.id)!.pending.isEmpty)
         precondition(!retryVM.messages.contains { $0.id == failedText.id })
         let staleSend = Task { await retryVM.sendPhotoMessage(imageData: photo) }
-        await waitForRequest(10)
+        await waitForRequest(14)
         auth.setCredentials(token: "other-account")
-        ChatURLProtocol.at(9).respond(200, try JSONEncoder().encode(message("255")))
+        ChatURLProtocol.at(13).respond(200, try JSONEncoder().encode(message("255")))
         await staleSend.value
         precondition(!retryVM.messages.contains { $0.id == "255" })
+
+        // Two watchOS submit callbacks for one text must share one POST.
+        let duplicateSuite = "TinyCord.ChatDuplicate.\(UUID())"
+        let duplicateDefaults = UserDefaults(suiteName: duplicateSuite)!
+        let duplicateAuth = AuthStore(defaults: duplicateDefaults, storage: MemoryChatAccounts())
+        duplicateAuth.setCredentials(token: "duplicate-token")
+        duplicateAuth.updateCurrentUser(user, forSession: duplicateAuth.sessionID)
+        let duplicatePresence = PresenceClient()
+        let duplicateVM = ChatViewModel(channel: channel, apiClient: DiscordAPIClient(session: URLSession(configuration: config), authStore: duplicateAuth, endpointConfig: endpoint), presenceClient: duplicatePresence, authStore: duplicateAuth, cacheDirectory: root.appendingPathComponent("duplicate"))
+        let requestBase = ChatURLProtocol.count
+        let duplicateOne = Task { await duplicateVM.sendMessage(text: "one submit") }
+        let duplicateTwo = Task { await duplicateVM.sendMessage(text: "one submit") }
+        await waitForRequest(requestBase + 1)
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        precondition(ChatURLProtocol.count == requestBase + 1, "Duplicate submit callbacks must be coalesced")
+        ChatURLProtocol.at(requestBase).respond(200, try JSONEncoder().encode(message("256", content: "one submit")))
+        await duplicateOne.value
+        await duplicateTwo.value
+        precondition(duplicateVM.messages.filter { $0.content == "one submit" }.count == 1)
+        duplicateDefaults.removePersistentDomain(forName: duplicateSuite)
+        print("PASS: duplicate submit callbacks coalesce into one POST and one visible message")
+
+        // If Discord accepted a POST but the client receives an error, the
+        // reconciliation pass adopts the delivered message instead of exposing
+        // a failed row that invites a second send.
+        let acceptedText = "accepted after error"
+        let acceptedSend = Task { await duplicateVM.sendMessage(text: acceptedText) }
+        await waitForRequest(requestBase + 2)
+        ChatURLProtocol.at(requestBase + 1).respond(500, Data("response lost".utf8))
+        await waitForRequest(requestBase + 3)
+        let deliveredTimestamp = DiscordMessage.isoFormatterStandard.string(from: Date())
+        ChatURLProtocol.at(requestBase + 2).respond(200, try JSONEncoder().encode([message("257", content: acceptedText, timestamp: deliveredTimestamp)]))
+        await acceptedSend.value
+        precondition(duplicateVM.messages.contains { $0.id == "257" && $0.sendStatus == .sent })
+        precondition(!duplicateVM.messages.contains { $0.sendStatus == .failed && $0.content == acceptedText })
+        print("PASS: accepted POST followed by a client error is reconciled without a duplicate retry")
+        // Unsend is limited to confirmed, recent messages authored by this account.
+        let sentNow = DiscordMessage.isoFormatterStandard.string(from: Date())
+        let now = Date()
+        let recent = message("258", timestamp: sentNow)
+        precondition(recent.canBeRemoved(by: user.id, at: now))
+        precondition(!recent.canBeRemoved(by: "102", at: now))
+        precondition(!recent.canBeRemoved(by: user.id, at: now.addingTimeInterval(901)))
+        precondition(!recent.canBeRemoved(by: user.id, at: now.addingTimeInterval(-60)))
+        precondition(!message("259", timestamp: "invalid").canBeRemoved(by: user.id))
+        precondition(!message("temp_1", timestamp: sentNow).canBeRemoved(by: user.id))
+        var notSent = recent; notSent.sendStatus = .failed
+        precondition(!notSent.canBeRemoved(by: user.id))
+        let call = DiscordMessage(id: "260", channelId: channel.id, author: user, content: "", timestamp: sentNow, type: 3)
+        precondition(!call.canBeRemoved(by: user.id))
+        precondition(!retryVM.canRemoveMessage(message("261", timestamp: "2020-01-01T00:00:00Z")))
+        auth.setCredentials(token: "test-token")
+        auth.updateCurrentUser(user, forSession: auth.sessionID)
+        let removeVM = ChatViewModel(channel: channel, apiClient: api, presenceClient: presence, authStore: auth, cacheDirectory: root)
+        removeVM.messages.append(recent)
+        cache.save(channelID: channel.id, messages: removeVM.messages, pending: [:], hasMoreHistory: false)
+        precondition(removeVM.canRemoveMessage(recent))
+        let failedRemoveBase = ChatURLProtocol.count
+        let failedRemove = Task { await removeVM.removeMessage(recent) }
+        await waitForRequest(failedRemoveBase + 1)
+        precondition(ChatURLProtocol.at(failedRemoveBase).request.httpMethod == "DELETE")
+        precondition(ChatURLProtocol.at(failedRemoveBase).request.url!.path.hasSuffix("/channels/channel/messages/258"))
+        await removeVM.removeMessage(recent)
+        precondition(ChatURLProtocol.count == failedRemoveBase + 1, "Two taps must not issue two DELETEs")
+        ChatURLProtocol.at(failedRemoveBase).respond(403, Data("forbidden".utf8))
+        await failedRemove.value
+        precondition(removeVM.messages.contains { $0.id == recent.id }, "Failed removal must preserve the message")
+        precondition(cache.load(channelID: channel.id)!.messages.contains { $0.id == recent.id })
+        precondition(removeVM.errorMessage?.contains("remove message") == true)
+        let acceptedRemoveBase = ChatURLProtocol.count
+        let acceptedRemove = Task { await removeVM.removeMessage(recent) }
+        await waitForRequest(acceptedRemoveBase + 1)
+        ChatURLProtocol.at(acceptedRemoveBase).respond(204, Data())
+        await acceptedRemove.value
+        precondition(!removeVM.messages.contains { $0.id == recent.id })
+        precondition(!cache.load(channelID: channel.id)!.messages.contains { $0.id == recent.id })
+        precondition(ChatURLProtocol.count == acceptedRemoveBase + 1)
+        let numericNonceJSON = Data("{\"id\":\"262\",\"nonce\":12345,\"channel_id\":\"channel\",\"author\":{\"id\":\"102\",\"username\":\"Friend\",\"bot\":false},\"content\":\"nonce\",\"timestamp\":\"2026-10-11T00:00:00Z\"}".utf8)
+        let numericNonce = try JSONDecoder().decode(DiscordMessage.self, from: numericNonceJSON)
+        precondition(numericNonce.nonce == "12345", "Numeric Discord nonces must decode without breaking message sends")
+
+        print("PASS: remove eligibility, confirmation-independent server deletion, duplicate guard, 403 preservation, 204 cache eviction")
         print("PASS: concurrent refresh arrivals/deletions, no incoming scroll request, text retry/discard and stale-account isolation")
         print("PASS: offline refresh keeps history, online refresh preserves failed uploads, photo retry uploads the image")
     }

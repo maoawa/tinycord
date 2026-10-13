@@ -70,7 +70,7 @@ struct ChannelListView: View {
                 }
             }
             .navigationTitle {
-                Text("DMs")
+                Text("TinyCord")
                     .foregroundStyle(themeManager.color)
                     .fontWeight(.semibold)
             }
@@ -155,14 +155,6 @@ struct ChannelListView: View {
             }
             .task {
                 await viewModel.loadChannels()
-            }
-            .alert("Discord read state", isPresented: Binding(
-                get: { viewModel.readStateError != nil },
-                set: { if !$0 { viewModel.readStateError = nil } }
-            )) {
-                Button("OK", role: .cancel) { viewModel.readStateError = nil }
-            } message: {
-                Text(viewModel.readStateError ?? "")
             }
             .refreshable {
                 await viewModel.loadChannels()

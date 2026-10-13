@@ -46,9 +46,22 @@
 		55CD490430549147009AE114 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		55B5425930784233003A5C0D /* Exceptions for "TinyCord" folder in "TinyCord" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 556DCC7A3051D1C90055D8E8 /* TinyCord */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		556DCC7D3051D1C90055D8E8 /* TinyCord */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				55B5425930784233003A5C0D /* Exceptions for "TinyCord" folder in "TinyCord" target */,
+			);
 			path = TinyCord;
 			sourceTree = "<group>";
 		};
@@ -355,13 +368,14 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 22;
+				CURRENT_PROJECT_VERSION = 30;
 				DEVELOPMENT_TEAM = CVS7CJXPF7;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Configuration/Watch-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = TinyCord;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "TinyCord uses the microphone for voice messages and voice calls.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "TinyCord needs photo library access to send images.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
@@ -375,7 +389,7 @@
 					"$(inherited)",
 					"$(SRCROOT)/VoiceNative/build/$(PLATFORM_NAME)/$(CURRENT_ARCH)",
 				);
-				MARKETING_VERSION = 0.7.3;
+				MARKETING_VERSION = 0.7.5;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lVoiceNative",
@@ -403,13 +417,14 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 22;
+				CURRENT_PROJECT_VERSION = 30;
 				DEVELOPMENT_TEAM = CVS7CJXPF7;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Configuration/Watch-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = TinyCord;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "TinyCord uses the microphone for voice messages and voice calls.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "TinyCord needs photo library access to send images.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
@@ -423,7 +438,7 @@
 					"$(inherited)",
 					"$(SRCROOT)/VoiceNative/build/$(PLATFORM_NAME)/$(CURRENT_ARCH)",
 				);
-				MARKETING_VERSION = 0.7.3;
+				MARKETING_VERSION = 0.7.5;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lVoiceNative",
@@ -452,11 +467,13 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 22;
+				CURRENT_PROJECT_VERSION = 30;
 				DEVELOPMENT_TEAM = CVS7CJXPF7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = TinyCord/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = TinyCord;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -468,7 +485,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.7.3;
+				MARKETING_VERSION = 0.7.5;
 				PRODUCT_BUNDLE_IDENTIFIER = com.candyrect.tinycord;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -488,11 +505,13 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 22;
+				CURRENT_PROJECT_VERSION = 30;
 				DEVELOPMENT_TEAM = CVS7CJXPF7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = TinyCord/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = TinyCord;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -504,7 +523,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.7.3;
+				MARKETING_VERSION = 0.7.5;
 				PRODUCT_BUNDLE_IDENTIFIER = com.candyrect.tinycord;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
